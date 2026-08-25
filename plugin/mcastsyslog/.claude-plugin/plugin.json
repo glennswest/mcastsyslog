@@ -1,0 +1,9 @@
+{
+  "name": "mcastsyslog",
+  "version": "0.2.0",
+  "description": "Read a stormcos fleet's multicast syslog: search, tail, analyse a boot or a crash, and see what every node was saying at one moment.",
+  "author": {
+    "name": "stormcos"
+  },
+  "keywords": ["logs", "syslog", "stormcos", "multicast", "observability"]
+}

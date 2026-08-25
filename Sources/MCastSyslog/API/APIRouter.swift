@@ -53,6 +53,8 @@ public struct APIRouter {
             return .response(clear(request))
         case "\(Self.prefix)/lifecycle":
             return .response(lifecycle(request))
+        case "\(Self.prefix)/analysis":
+            return .response(analysis(request))
         default:
             if path.hasPrefix("\(Self.prefix)/events/"),
                let id = Int64(path.dropFirst("\(Self.prefix)/events/".count)) {
@@ -93,6 +95,13 @@ public struct APIRouter {
                                 "last": "the span to look over, e.g. 6h (default 24h)",
                                 "from": "explicit lower bound", "to": "explicit upper bound",
                                 "gap": "silence that ends a run, e.g. 90s (default 90s)"]],
+                ["path": "\(Self.prefix)/analysis", "description": "a deep dive of a whole sequence: phases, the order workloads came up, gaps, escalations, what was unusual, and what other nodes were saying at each fault",
+                 "parameters": ["host": "narrow to one or more nodes",
+                                "last": "the span to read, e.g. 1h (default 1h)",
+                                "from": "explicit lower bound", "to": "explicit upper bound",
+                                "at": "centre on a moment instead, with `window` seconds either side",
+                                "window": "seconds either side of `at` (default 300)",
+                                "align_to_run": "when one host is named, start the window at its most recent boot rather than where `last` reaches back to. On by default unless `from` or `at` is given."]],
                 ["path": "\(Self.prefix)/clear", "description": "delete every stored event. Off unless enabled, loopback only, needs confirm=yes",
                  "parameters": ["confirm": "must be `yes`"]],
             ],
@@ -143,6 +152,7 @@ public struct APIRouter {
             },
             "run_endings": [
                 ["value": "running", "description": "still talking"],
+                ["value": "rebooted", "description": "the run ended because the node booted again"],
                 ["value": "faulted", "description": "stopped, and the last thing it said was a fault — as close to `it crashed` as anything outside the node can honestly get"],
                 ["value": "cut_off", "description": "stopped mid-stream and said nothing about why"],
                 ["value": "quiet", "description": "stopped, having barely been talking"],
@@ -511,6 +521,7 @@ public struct APIRouter {
                             "id": marker.id,
                             "marker": marker.marker.rawValue,
                             "label": marker.marker.label,
+                            "stated": marker.stated,
                             "host": marker.host,
                             "at": Timestamp.format(marker.timeNanos, style: .rfc3339UTC),
                             "recv": Timestamp.format(marker.recvNanos, style: .rfc3339UTC),
@@ -545,6 +556,143 @@ public struct APIRouter {
         } catch {
             return .error(500, "Internal Server Error", "\(error)")
         }
+    }
+
+    /// The deep dive.
+    private func analysis(_ request: HTTPRequest) -> HTTPResponse {
+        let now = Timestamp.now()
+        var from = now - 3600 * 1_000_000_000
+        var to = now
+        do {
+            if let at = request.first("at") {
+                guard let centre = Timestamp.parseFlexible(at) else {
+                    return .error(400, "Bad Request", "could not read `at=\(at)` as a time")
+                }
+                let window = Int64((Double(request.first("window") ?? "") ?? 300) * 1e9)
+                from = centre - window
+                to = centre + window
+            } else if let last = request.first("last") {
+                guard let span = ParsedQuery.duration(last) else {
+                    return .error(400, "Bad Request", "`\(last)` is not a span — try 1h, 30m, 2d")
+                }
+                from = now - span
+            } else {
+                if let explicit = try ParsedQuery.time(request.first("from"), name: "from") { from = explicit }
+                if let explicit = try ParsedQuery.time(request.first("to"), name: "to") { to = explicit }
+            }
+        } catch {
+            return badRequest(error)
+        }
+        guard to > from else {
+            return .error(400, "Bad Request", "the window ends before it begins")
+        }
+
+        let hosts = Set(request.list("host"))
+        do {
+            return try context.withReader { reader in
+                let alignToRun = request.bool("align_to_run") ?? (request.first("from") == nil && request.first("at") == nil)
+                let a = try reader.analyse(from: from, to: to, hosts: hosts, alignToRun: alignToRun)
+                return .json(Self.encode(a))
+            }
+        } catch {
+            return .error(500, "Internal Server Error", "\(error)")
+        }
+    }
+
+    static func encode(_ a: SequenceAnalysis) -> [String: Any] {
+        func at(_ nanos: Int64) -> String { Timestamp.format(nanos, style: .rfc3339UTC) }
+
+        return [
+            "from": at(a.fromNanos),
+            "to": at(a.toNanos),
+            "duration_seconds": Double(a.toNanos - a.fromNanos) / 1e9,
+            "aligned_to_run": a.alignedToRun,
+            "hosts": a.hosts,
+            "total_events": a.totalEvents,
+            // The whole thing in sentences, first, because that is what someone
+            // reading this at 3am actually wants.
+            "narrative": a.narrative,
+            "phases": a.phases.map {
+                [
+                    "phase": $0.kind.rawValue,
+                    "started": at($0.startNanos),
+                    "ended": at($0.endNanos),
+                    "duration_seconds": Double($0.durationNanos) / 1e9,
+                    "events": $0.events,
+                    "worst_severity_name": $0.worst.label,
+                    "note": $0.note,
+                ]
+            },
+            "workloads": a.debuts.map {
+                [
+                    "tag": $0.tag,
+                    "first_seen": at($0.firstNanos),
+                    "offset_seconds": Double($0.offsetNanos) / 1e9,
+                    "last_seen": at($0.lastNanos),
+                    "events": $0.events,
+                    "worst_severity_name": $0.worst.label,
+                ]
+            },
+            "escalations": a.escalations.map {
+                [
+                    "severity": Int($0.severity.rawValue),
+                    "severity_name": $0.severity.label,
+                    "at": at($0.atNanos),
+                    "offset_seconds": Double($0.offsetNanos) / 1e9,
+                    "host": $0.host,
+                    "tag": $0.tag,
+                    "message": $0.message,
+                    "event_id": $0.eventId,
+                ]
+            },
+            "gaps": a.gaps.map {
+                [
+                    "host": $0.host,
+                    "after": at($0.afterNanos),
+                    "until": at($0.untilNanos),
+                    "duration_seconds": Double($0.durationNanos) / 1e9,
+                    "last_message_before": $0.lastMessage,
+                ]
+            },
+            "findings": a.findings.map {
+                var object: [String: Any] = [
+                    "title": $0.title,
+                    "detail": $0.detail,
+                    "confidence": $0.confidence.rawValue,
+                ]
+                if let nanos = $0.atNanos { object["at"] = at(nanos) }
+                if let host = $0.host { object["host"] = host }
+                return object
+            },
+            "correlations": a.correlations.map {
+                [
+                    "fault_event_id": $0.faultId,
+                    "fault_host": $0.faultHost,
+                    "fault_message": $0.faultMessage,
+                    "at": at($0.atNanos),
+                    "window_seconds": $0.windowSeconds,
+                    "elsewhere": $0.elsewhere.map { ExportFormatter.json($0) },
+                ]
+            },
+            "rate_profile": a.rateProfile.map {
+                ["at": at($0.startNanos), "events": $0.events, "worst_severity_name": $0.worst.label]
+            },
+            "flags": [
+                "malformed": a.malformed,
+                "clock_unset": a.clockUnset,
+                "lines_the_nodes_held_back": a.linesHeldBack,
+            ],
+            "clock_skew": [
+                "at_start_seconds": a.skewStartNanos.map { Double($0) / 1e9 } as Any,
+                "at_end_seconds": a.skewEndNanos.map { Double($0) / 1e9 } as Any,
+                "note": "Receive time minus sender time. A large skew that shrinks fast is a node replaying a boot's backlog, which is correct behaviour.",
+            ],
+            "confidence_levels": [
+                "stated": "the node said so",
+                "observed": "the stream shows it directly",
+                "suggested": "consistent with the stream, but other explanations fit",
+            ],
+        ]
     }
 
     private func badRequest(_ error: Error) -> HTTPResponse {

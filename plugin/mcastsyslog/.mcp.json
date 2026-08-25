@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mcastsyslog": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
+      "env": {
+        "MCASTSYSLOG_API": "http://127.0.0.1:8514"
+      }
+    }
+  }
+}

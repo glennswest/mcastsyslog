@@ -74,7 +74,14 @@ public final class EventReader: @unchecked Sendable {
 
     private func beginQuery() { cancelled.set(false) }
 
-    private static let columns = """
+    /// Prepare a statement on this reader's own connection. Used by the
+    /// analysis extension, which is a separate file for length rather than
+    /// because it is a separate thing.
+    func prepare(_ sql: String) throws -> SQLiteStatement {
+        try connection.prepare(sql)
+    }
+
+    static let columns = """
         e.id, e.recv_ns, e.sent_ns, e.host, e.tag, e.severity, e.facility, \
         e.flags, e.repeated, e.source, e.message, e.raw
         """
@@ -260,6 +267,7 @@ public final class EventReader: @unchecked Sendable {
                OR ((prev_flags & \(EventFlags.clockUnset.rawValue)) != 0
                    AND (flags & \(EventFlags.clockUnset.rawValue)) = 0)
                OR severity <= \(Severity.critical.rawValue)
+               OR message LIKE 'Linux version %'
             ORDER BY id
             LIMIT ?
             """
@@ -295,8 +303,14 @@ public final class EventReader: @unchecked Sendable {
             // boot is often also the frame that has no clock. Classified in the
             // order that says the most about what happened.
             let marker: LifecycleMarker
+            var stated = false
             var gap: Int64?
-            if previousRecv == nil {
+            if message.hasPrefix("Linux version ") {
+                // The kernel says so. Nothing inferred beats that.
+                marker = .kernelBoot
+                stated = true
+                if let previousRecv { gap = recv - previousRecv }
+            } else if previousRecv == nil {
                 marker = .boot
             } else if let previousRecv, recv - previousRecv > policy.gapNanos {
                 marker = .boot
@@ -310,13 +324,34 @@ public final class EventReader: @unchecked Sendable {
             }
 
             report.markers.append(LifecycleEvent(
-                id: id, marker: marker, host: host, recvNanos: recv, sentNanos: sent,
-                severity: severity, message: message, gapNanos: gap))
+                id: id, marker: marker, stated: stated, host: host, recvNanos: recv,
+                sentNanos: sent, severity: severity, message: message, gapNanos: gap))
         }
 
         report.runs = try runs(from: fromNanos, to: toNanos, hosts: hosts,
                                policy: policy, markers: report.markers)
         return report
+    }
+
+    /// Merge stated and inferred boot markers into one set of run boundaries.
+    ///
+    /// Both are kept: a stated boot does not mean the inferred ones elsewhere
+    /// in the stream were wrong, and dropping them merged six restarts of one
+    /// node into a single run. What has to be avoided is counting the *same*
+    /// boot twice — the kernel banner and the first line of userspace arrive
+    /// milliseconds apart — so boundaries close together collapse to one, and
+    /// the stated one wins.
+    static func coalesceBoots(_ markers: [LifecycleEvent], within nanos: Int64 = 5_000_000_000) -> [Int64] {
+        let boots = markers.filter(\.startsARun).sorted { $0.recvNanos < $1.recvNanos }
+        var kept: [(nanos: Int64, stated: Bool)] = []
+        for boot in boots {
+            if let last = kept.last, boot.recvNanos - last.nanos <= nanos {
+                if boot.stated, !last.stated { kept[kept.count - 1] = (boot.recvNanos, true) }
+                continue
+            }
+            kept.append((boot.recvNanos, boot.stated))
+        }
+        return kept.map(\.nanos)
     }
 
     /// Turn the boundaries into runs, and say how each one ended.
@@ -351,12 +386,23 @@ public final class EventReader: @unchecked Sendable {
 
         var runs: [NodeRun] = []
         for row in hostRows {
-            let boundaries = (byHost[row.host] ?? [])
-                .filter { $0.marker == .boot || $0.marker == .clockReset }
-                .map(\.recvNanos)
+            // A run begins at a boot. A clock reset is worth marking — the
+            // node's sense of time changed underneath it — but a node running
+            // ntpd steps its clock in the middle of a perfectly healthy run,
+            // and splitting the run there would invent a reboot that did not
+            // happen.
+            let hostMarkers = byHost[row.host] ?? []
+            let boundaries = Self.coalesceBoots(hostMarkers)
+            // The first event of the window and the first boot in it are the
+            // same moment seen twice when the window opens on a boot, so they
+            // are collapsed the same way boundaries are — otherwise the report
+            // opens with a run zero seconds long.
             let starts = ([row.first] + boundaries).sorted().reduce(into: [Int64]()) { unique, value in
-                if unique.last != value { unique.append(value) }
+                if let last = unique.last, value - last <= 5_000_000_000 { return }
+                unique.append(value)
             }
+
+            let statedStarts = Set(hostMarkers.filter { $0.marker == .kernelBoot }.map(\.recvNanos))
 
             for (position, start) in starts.enumerated() {
                 let end = position + 1 < starts.count ? starts[position + 1] : row.last
@@ -371,10 +417,18 @@ public final class EventReader: @unchecked Sendable {
                 // nothing about how.
                 let ending: RunEnding
                 if !isLast {
-                    // It stopped and came back. Whether that was a crash or a
-                    // clean restart is not visible from here — unless it was
-                    // saying something was wrong when it stopped.
-                    ending = markersInRun.last?.marker == .fault ? .faulted : .cutOff
+                    let nextStart = starts[position + 1]
+                    if markersInRun.last?.marker == .fault {
+                        // It was saying something was wrong, and then it
+                        // restarted. That ordering is worth keeping.
+                        ending = .faulted
+                    } else if statedStarts.contains(nextStart) {
+                        // The kernel announced the next boot, so this run ended
+                        // in a restart rather than merely stopping.
+                        ending = .rebooted
+                    } else {
+                        ending = .cutOff
+                    }
                 } else if silence < policy.gapNanos {
                     ending = .running
                 } else if markersInRun.last?.marker == .fault {

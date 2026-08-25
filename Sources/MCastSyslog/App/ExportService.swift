@@ -21,7 +21,7 @@ public enum ExportFormatter {
         let time = Timestamp.format(event.time(by: ordering), style: .full)
         let host = event.host.padding(toLength: max(event.host.count, 14), withPad: " ", startingAt: 0)
         let tag = event.tag.padding(toLength: max(event.tag.count, 12), withPad: " ", startingAt: 0)
-        var line = "\(time)  \(event.severity.short)  \(host)  \(tag)  \(event.message)"
+        var line = "\(time)  \(event.severity.short)  \(host)  \(tag)  \(PlainText.strip(event.message))"
         if event.flags.contains(.malformed) { line += "   [malformed]" }
         if event.flags.contains(.clockUnset) { line += "   [clock unset]" }
         return line
@@ -66,6 +66,11 @@ public enum ExportFormatter {
             "source": event.source,
             "message": event.message,
         ]
+        // The escapes a workload wrote for a terminal stay in `message`,
+        // because that is what the node sent. This is the same line as a person
+        // would read it, and it appears only when the two differ.
+        let plain = PlainText.strip(event.message)
+        if plain != event.message { object["message_plain"] = plain }
         if let sent = event.sentNanos {
             object["sent_ns"] = sent
             object["sent"] = Timestamp.format(sent, style: .rfc3339UTC)

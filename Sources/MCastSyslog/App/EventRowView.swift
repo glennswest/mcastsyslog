@@ -57,14 +57,14 @@ struct EventRowView: View {
                 Image(systemName: event.flags.contains(.rateLimitNotice)
                       ? "gauge.with.dots.needle.bottom.50percent" : "arrow.triangle.2.circlepath")
                     .font(.system(size: 10))
-                Text(event.message)
+                Text(PlainText.strip(event.message))
                     .italic()
             }
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(event.severity.color)
             .textSelection(.enabled)
         } else {
-            Text(event.message)
+            Text(PlainText.strip(event.message))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(event.severity.messageColor)
                 .textSelection(.enabled)
@@ -135,7 +135,8 @@ struct EventContextMenu: View {
             model.filter = next
         }
         Divider()
-        Button("Copy message") { copy(event.message) }
+        Button("Copy message") { copy(PlainText.strip(event.message)) }
+        Button("Copy message, escapes and all") { copy(event.message) }
         Button("Copy line") { copy(ExportFormatter.textLine(event)) }
         Button("Copy timestamp") {
             copy(Timestamp.format(event.time(by: model.settings.ordering), style: .rfc3339UTC))

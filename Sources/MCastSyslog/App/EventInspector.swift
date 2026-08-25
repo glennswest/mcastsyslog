@@ -30,7 +30,7 @@ struct EventInspector: View {
                 header(event)
 
                 Section2("Message") {
-                    Text(event.message)
+                    Text(PlainText.strip(event.message))
                         .font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
