@@ -46,7 +46,7 @@ final class APITests: XCTestCase {
             recvNanos: base + Int64(index) * 1_000_000_000,
             sentNanos: flags.contains(.clockUnset) ? nil : base + Int64(index) * 1_000_000_000,
             host: host, tag: tag, severity: severity, flags: flags, repeated: repeated,
-            source: "192.168.8.\(index + 10)", message: message, raw: raw)
+            source: "203.0.113.\(index + 10)", message: message, raw: raw)
     }
 
     // MARK: - Calling the router

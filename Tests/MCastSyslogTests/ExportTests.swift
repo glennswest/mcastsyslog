@@ -12,7 +12,7 @@ final class ExportTests: XCTestCase {
             sentNanos: 1_787_003_231_000_001_000,
             host: "storm-09", tag: "stormpump", severity: .error, facility: 16,
             flags: [.malformed, .rateLimitNotice], repeated: 412,
-            source: "192.168.1.9", message: "ERROR quorum lost",
+            source: "203.0.113.9", message: "ERROR quorum lost",
             raw: Data([0x01, 0xFF, 0x00])
         )
 
@@ -59,7 +59,7 @@ final class ExportTests: XCTestCase {
             LogEvent(recvNanos: base + Int64(i) * 1_000_000, sentNanos: base + Int64(i) * 1_000_000,
                      host: "storm-0\(i % 3)", tag: "stormblock",
                      severity: i % 7 == 0 ? .error : .info,
-                     source: "10.0.0.1", message: "line \(i) — vol-\(i)")
+                     source: "203.0.113.1", message: "line \(i) — vol-\(i)")
         }
         try store.insert(originals)
 
@@ -90,7 +90,7 @@ final class ExportTests: XCTestCase {
             LogEvent(recvNanos: base + Int64(i) * 1_000_000, sentNanos: base + Int64(i) * 1_000_000,
                      host: "storm-0\(i % 3)", tag: "stormblock",
                      severity: i % 5 == 0 ? .error : .info,
-                     source: "10.0.0.1", message: "line \(i)")
+                     source: "203.0.113.1", message: "line \(i)")
         }
         try store.insert(originals)
 

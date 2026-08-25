@@ -3,7 +3,11 @@ import XCTest
 
 final class SyslogParserTests: XCTestCase {
 
-    private func parse(_ text: String, from source: String = "192.168.1.10", at recv: Int64 = 1_700_000_000_000_000_000) -> LogEvent {
+    // Addresses throughout the tests come from the RFC 5737 documentation
+    // ranges — 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 — which exist so
+    // that an example cannot be mistaken for, or collide with, a real network.
+
+    private func parse(_ text: String, from source: String = "203.0.113.10", at recv: Int64 = 1_700_000_000_000_000_000) -> LogEvent {
         SyslogParser.parse(Data(text.utf8), from: source, receivedAt: recv)
     }
 
@@ -30,7 +34,7 @@ final class SyslogParserTests: XCTestCase {
         XCTAssertEqual(event.severity, .info)
         XCTAssertEqual(event.message, "this is not syslog at all")
         XCTAssertEqual(event.raw, Data("this is not syslog at all".utf8))
-        XCTAssertEqual(event.host, "192.168.1.10", "a frame with no hostname is attributed to where it came from")
+        XCTAssertEqual(event.host, "203.0.113.10", "a frame with no hostname is attributed to where it came from")
     }
 
     func testKeepsAFrameWithAnEmbeddedNulByte() {
@@ -42,7 +46,7 @@ final class SyslogParserTests: XCTestCase {
     func testKeepsInvalidUTF8RatherThanDroppingTheLine() {
         var bytes = Array("<134>1 2026-08-24T21:47:11.000000Z storm-01 kernel - - - broken ".utf8)
         bytes.append(0xFF)                              // not valid UTF-8 anywhere
-        let event = SyslogParser.parse(Data(bytes), from: "10.0.0.1", receivedAt: 1)
+        let event = SyslogParser.parse(Data(bytes), from: "203.0.113.1", receivedAt: 1)
         XCTAssertFalse(event.flags.contains(.malformed))
         XCTAssertTrue(event.message.hasPrefix("broken "))
     }
@@ -113,7 +117,7 @@ final class SyslogParserTests: XCTestCase {
     }
 
     func testHostnameNilValueFallsBackToTheSourceAddress() {
-        let event = parse("<134>1 2026-08-24T21:47:11.000000Z - kernel - - - x", from: "10.1.2.3")
-        XCTAssertEqual(event.host, "10.1.2.3")
+        let event = parse("<134>1 2026-08-24T21:47:11.000000Z - kernel - - - x", from: "198.51.100.3")
+        XCTAssertEqual(event.host, "198.51.100.3")
     }
 }

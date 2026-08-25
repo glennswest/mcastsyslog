@@ -7,6 +7,12 @@ All notable changes to mcastsyslog are recorded here. The format follows
 ## [Unreleased]
 
 ### 2026-08-25
+- **chore:** Test fixtures and the API documentation now use the RFC 5737
+  documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`)
+  instead of RFC 1918 addresses. The repository is public, and a private-range
+  example in a fleet tool reads as a hint about the fleet's real addressing.
+  Those ranges exist precisely so an example cannot be mistaken for a real
+  network.
 - **perf:** `/api/v1/analysis` took twenty seconds at three quarters of a
   million events and now takes three, and a hundred milliseconds on a small
   window. Three causes: it ran the whole lifecycle scan just to find a boot to

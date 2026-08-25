@@ -18,7 +18,7 @@ final class FilterStateTests: XCTestCase {
         at offset: Int64 = 0
     ) -> LogEvent {
         LogEvent(recvNanos: now + offset, sentNanos: now + offset, host: host, tag: tag,
-                 severity: severity, flags: flags, source: "10.0.0.1", message: message)
+                 severity: severity, flags: flags, source: "203.0.113.1", message: message)
     }
 
     private func matches(_ event: LogEvent, _ build: (inout FilterState) -> Void) -> Bool {

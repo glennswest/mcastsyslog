@@ -32,7 +32,7 @@ final class AnalysisTests: XCTestCase {
         LogEvent(recvNanos: base + offset,
                  sentNanos: flags.contains(.clockUnset) ? nil : base + (sentOffset ?? offset),
                  host: host, tag: tag, severity: severity, flags: flags, repeated: repeated,
-                 source: "192.168.8.11", message: message)
+                 source: "203.0.113.11", message: message)
     }
 
     /// A boot shaped like the real one this was built against.

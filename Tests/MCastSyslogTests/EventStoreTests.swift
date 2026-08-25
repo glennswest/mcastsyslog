@@ -41,7 +41,7 @@ final class EventStoreTests: XCTestCase {
                 recvNanos: base + offset + Int64(i) * spacingNanos,
                 sentNanos: base + offset + Int64(i) * spacingNanos - 1_000_000,
                 host: host, tag: tag, severity: severity, flags: flags,
-                source: "10.0.0.1", message: message(i)
+                source: "203.0.113.1", message: message(i)
             )
         }
         try store.insert(events)
@@ -65,7 +65,7 @@ final class EventStoreTests: XCTestCase {
             sentNanos: nil,
             host: "storm-09", tag: "stormpump", severity: .error, facility: 16,
             flags: [.malformed, .clockUnset], repeated: 17,
-            source: "192.168.1.9", message: "ERROR quorum lost",
+            source: "203.0.113.9", message: "ERROR quorum lost",
             raw: Data([0x01, 0x02, 0xFF])
         )
         try store.insert([original])
@@ -200,7 +200,7 @@ final class EventStoreTests: XCTestCase {
 
     private func event(_ message: String, host: String = "storm-01") -> LogEvent {
         LogEvent(recvNanos: base + Int64(abs(message.hashValue % 1_000_000)), sentNanos: nil,
-                 host: host, tag: "stormblock", severity: .info, source: "10.0.0.1", message: message)
+                 host: host, tag: "stormblock", severity: .info, source: "203.0.113.1", message: message)
     }
 
     private func search(_ text: String, mode: SearchMode = .tokens) throws -> [LogEvent] {

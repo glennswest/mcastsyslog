@@ -243,7 +243,7 @@ An event is the encoding documented in [EXPORT.md](EXPORT.md), plus an `id`:
   "sent_ns": 1787608031000001000,
   "sent": "2026-08-24T21:47:11.000001Z",
   "host": "storm-01",
-  "source": "192.168.8.11",
+  "source": "203.0.113.11",
   "tag": "stormblock",
   "severity": 3,
   "severity_name": "error",

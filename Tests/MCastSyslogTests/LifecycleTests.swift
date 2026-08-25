@@ -37,7 +37,7 @@ final class LifecycleTests: XCTestCase {
             recvNanos: base + offset,
             sentNanos: flags.contains(.clockUnset) ? nil : base + (sentOffset ?? offset),
             host: host, tag: tag, severity: severity, flags: flags,
-            source: "192.168.8.11", message: message)
+            source: "203.0.113.11", message: message)
     }
 
     /// A boot the kernel announced, which is the only kind that is not a guess.
