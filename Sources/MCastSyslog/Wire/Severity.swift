@@ -16,9 +16,21 @@ public enum Severity: UInt8, CaseIterable, Comparable, Codable, Sendable {
     case info      = 6
     case debug     = 7
 
-    /// Lower raw value is more severe, so ordering is inverted from the raw value.
+    /// Ordered by the raw value, so `.emergency < .debug` and `min()` is the
+    /// worst thing in a collection.
+    ///
+    /// This was originally inverted — "more severe sorts first" felt like the
+    /// natural reading — and it made `min()` return the *least* severe at three
+    /// call sites that all wanted the worst. A comparator that surprises its
+    /// own author is the wrong comparator; the severity numbers already say
+    /// which direction is worse, and `worst` below says it in words.
     public static func < (lhs: Severity, rhs: Severity) -> Bool {
-        lhs.rawValue > rhs.rawValue
+        lhs.rawValue < rhs.rawValue
+    }
+
+    /// The worse of two severities.
+    public static func worst(_ lhs: Severity, _ rhs: Severity) -> Severity {
+        lhs.rawValue <= rhs.rawValue ? lhs : rhs
     }
 
     public var label: String {

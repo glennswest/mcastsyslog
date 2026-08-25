@@ -137,7 +137,7 @@ extension EventReader {
             }
         }
         // Worst first: the first emergency matters more than the first warning.
-        analysis.escalations.sort { $0.severity < $1.severity }
+        analysis.escalations.sort { $0.severity.rawValue < $1.severity.rawValue }
 
         // MARK: Gaps — where the time went
 
@@ -266,14 +266,18 @@ extension EventReader {
 
         // Coming up: workloads still appearing for the first time.
         //
-        // Only the ones that go on to say something substantial count as
-        // boundaries. A tag that appears once, hours in, is not the system
-        // still starting up — and treating it as one stretches "startup" across
-        // the whole window, which is what happened the first time this ran
+        // Startup ends where the debuts stop arriving in a run, not at the last
+        // debut of any kind. A tag that appears once, twenty minutes after
+        // everything else, is not the system still starting up — and counting
+        // it stretched "startup" across the whole window when this first ran
         // against a real fleet.
-        let substantial = analysis.debuts.filter {
-            $0.events >= 5 || Double($0.events) >= Double(analysis.totalEvents) * 0.01
-        }
+        //
+        // Size was the wrong test for that: on a small window a single line can
+        // be one percent of the traffic, and on a large one a workload that
+        // matters can be a fraction of a percent. What actually separates them
+        // is time — a debut that arrives long after the previous one has
+        // nothing to do with coming up.
+        let substantial = Self.debutsBelongingToStartup(analysis.debuts)
         if let lastDebut = substantial.map(\.firstNanos).max(), lastDebut > cursor {
             let measured = try measure(cursor, lastDebut)
             let late = analysis.debuts.count - substantial.count
@@ -302,6 +306,30 @@ extension EventReader {
                                 note: "The set of workloads had stopped changing."))
         }
         return phases
+    }
+
+    /// The leading run of debuts that arrive close enough together to be one
+    /// system coming up.
+    ///
+    /// Each debut extends the run if it lands within a grace period of the last
+    /// one — sixty seconds, or three times however long startup has taken so
+    /// far, whichever is longer. The second term matters: a node that takes two
+    /// minutes to bring up its storage should not have the next workload judged
+    /// against the same window as one that took two seconds.
+    static func debutsBelongingToStartup(
+        _ debuts: [SequenceAnalysis.Debut]
+    ) -> [SequenceAnalysis.Debut] {
+        let ordered = debuts.sorted { $0.firstNanos < $1.firstNanos }
+        guard let first = ordered.first else { return [] }
+
+        var kept = [first]
+        for debut in ordered.dropFirst() {
+            let elapsed = kept.last!.firstNanos - first.firstNanos
+            let grace = max(60_000_000_000, elapsed * 3)
+            guard debut.firstNanos - kept.last!.firstNanos <= grace else { break }
+            kept.append(debut)
+        }
+        return kept
     }
 
     // MARK: - What was unusual
