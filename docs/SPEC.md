@@ -111,18 +111,34 @@ CREATE TABLE events (
     repeated  INTEGER,               -- N, on a collapsed-repeat or dropped notice
     source    TEXT    NOT NULL,      -- the address the datagram actually came from
     message   TEXT    NOT NULL,
-    raw       BLOB                   -- the frame verbatim, kept when malformed
+    raw       BLOB,                  -- the frame verbatim, kept when malformed
+    -- The time the viewer orders by under the default ordering. A node with no
+    -- clock falls back to when we heard it, which is the only answer there is.
+    -- Stored rather than computed so the ordering is an index seek.
+    event_ns  INTEGER GENERATED ALWAYS AS (COALESCE(sent_ns, recv_ns)) STORED
 );
 
-CREATE INDEX events_by_time ON events (recv_ns, id);
-CREATE INDEX events_by_host ON events (host, recv_ns, id);
-CREATE INDEX events_by_tag  ON events (tag,  recv_ns, id);
-CREATE INDEX events_by_sev  ON events (severity, recv_ns, id);
-CREATE INDEX events_by_sent ON events (sent_ns, id);
+CREATE INDEX events_by_time  ON events (recv_ns, id);
+CREATE INDEX events_by_event ON events (event_ns, id);
+CREATE INDEX events_by_host  ON events (host, recv_ns, id);
+CREATE INDEX events_by_tag   ON events (tag,  recv_ns, id);
+CREATE INDEX events_by_sev   ON events (severity, recv_ns, id);
+CREATE INDEX events_by_sent  ON events (sent_ns, id);
 
 CREATE VIRTUAL TABLE events_fts USING fts5 (
     message, content='events', content_rowid='id', tokenize='unicode61'
 );
+
+-- A directory of what has been heard: which hosts and tags exist, and when each
+-- was first and last seen. It exists so the filter menus and the fleet list can
+-- populate themselves without scanning the corpus, and so a node that has gone
+-- silent — the one most worth selecting — is still in the list.
+CREATE TABLE hosts (host TEXT PRIMARY KEY, first_ns INTEGER NOT NULL,
+                    last_ns INTEGER NOT NULL, source TEXT);
+CREATE TABLE tags  (tag  TEXT PRIMARY KEY, first_ns INTEGER NOT NULL,
+                    last_ns INTEGER NOT NULL);
+
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
 The clustering key is receive time, not sender time: it is monotonic at the
