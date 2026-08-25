@@ -14,7 +14,7 @@ XCB := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG)
 	-derivedDataPath $(DERIVED) CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO \
 	CODE_SIGNING_ALLOWED=YES
 
-.PHONY: all app run test sim clean project
+.PHONY: all app run test sim clean project icon
 
 all: app
 
@@ -42,6 +42,14 @@ test: $(PROJECT)
 # Synthetic traffic, for working on the viewer without a fleet to watch.
 sim: app
 	$(SIM)
+
+# Redraw the app icon. The .icns is committed, but it is generated from
+# Tools/make-icon.swift rather than from a drawing program, so changing it is
+# an edit to a file that can be read and reviewed.
+icon:
+	swift Tools/make-icon.swift Resources
+	iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns
+	@echo "wrote Resources/AppIcon.icns"
 
 clean:
 	rm -rf $(DERIVED) $(PROJECT)

@@ -25,6 +25,7 @@ not checked in as a merge hazard.
 | Target | Kind | What it is |
 |---|---|---|
 | `MCastSyslog` | macOS app | The viewer. SwiftUI + AppKit. |
+| `Tools/make-icon.swift` | script | Draws `Resources/AppIcon.icns`. Run with `make icon`. |
 | `stormsim` | CLI tool | Emits synthetic RFC 5424 traffic to the group, for testing without a fleet. |
 | `MCastSyslogTests` | unit tests | Parser, timestamps, plain text, store, filter/SQL agreement, lifecycle, analysis, export encoding and the REST API. 140 of them. |
 

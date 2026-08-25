@@ -31,3 +31,7 @@ Thumbs.db
 *.log
 tmp/
 temp/
+
+# Intermediate icon renditions; the .icns and the preview PNG are committed,
+# and `make icon` regenerates these from Tools/make-icon.swift.
+Resources/AppIcon.iconset/

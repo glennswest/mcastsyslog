@@ -1,3 +1,5 @@
+<img src="Resources/AppIcon.png" width="96" align="right" alt="">
+
 # mcastsyslog
 
 A macOS viewer for a fleet of stormcos nodes that are talking.
