@@ -7,6 +7,19 @@ All notable changes to mcastsyslog are recorded here. The format follows
 ## [Unreleased]
 
 ### 2026-08-24
+- **feat:** Read-only REST API (`/api/v1`) — events, search, one event by id,
+  around-a-moment, hosts, tags, fleet, summary, stats, the type definitions,
+  and a Server-Sent Events live tail. Filters parse into the same `FilterState`
+  the window uses, so HTTP and the UI cannot give different answers. Off by
+  default, bound to `127.0.0.1`, no CORS header. Documented in `docs/API.md`.
+- **feat:** A small browser console at `/`, so the API is usable without
+  writing a client first.
+- **fix:** The event JSON encoding never emitted `id`, which made the
+  documented `/events/{id}` endpoint unreachable — there was no way to learn an
+  id. It is written now, and deliberately ignored on import since it means
+  nothing in another viewer's store.
+- **docs:** `docs/EXPORT.md` — the event encoding written down as a format, so
+  `must-gather` can produce the same shape.
 - **fix:** `PRAGMA auto_vacuum` was being set after `journal_mode = WAL`, which
   makes SQLite accept it and silently do nothing — even on a database with no
   tables. Retention would delete rows forever while the file never shrank, so

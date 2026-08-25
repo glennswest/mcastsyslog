@@ -24,7 +24,7 @@ not checked in as a merge hazard.
 |---|---|---|
 | `MCastSyslog` | macOS app | The viewer. SwiftUI + AppKit. |
 | `stormsim` | CLI tool | Emits synthetic RFC 5424 traffic to the group, for testing without a fleet. |
-| `MCastSyslogTests` | unit tests | Parser, store, query and retention tests. |
+| `MCastSyslogTests` | unit tests | Parser, timestamps, store, filter/SQL agreement, export encoding and the REST API. |
 
 Source layout under `Sources/MCastSyslog/`:
 
@@ -36,6 +36,8 @@ Source layout under `Sources/MCastSyslog/`:
   when the interface set changes.
 - `Store/` — SQLite (the system `libsqlite3`, no third-party dependency).
   Schema, batched writer, index-driven queries, FTS5 token search, retention.
+- `API/` — the read-only REST API: a small HTTP/1.1 server on `NWListener`,
+  the routes, query-parameter parsing, SSE fan-out and the browser console.
 - `App/` — SwiftUI views, view models, export.
 - `Support/` — version, formatting, small shared helpers.
 
@@ -66,6 +68,7 @@ already on the machine. `docs/SPEC.md` has been amended accordingly.
 - [x] `stormsim` — synthetic traffic generator
 - [x] Tests — parser, store, query, retention
 - [x] Build, run, verify against `stormsim`
+- [x] REST API — retrieve, search, types, summary, stats, live SSE, console
 - [ ] v0.1.0 release
 
 ## Non-negotiables from the spec
@@ -82,3 +85,7 @@ These are properties, not preferences. A change that breaks one is a bug.
    and is cancellable; it does not quietly truncate.
 5. **Record both times.** Sender and receive time are separate fields, and
    their disagreement is shown, not smoothed over.
+6. **The REST API is read-only and loopback by default.** Only `GET` and `HEAD`
+   are routed, nothing it can reach has a path back to a node, and it sends no
+   CORS header — with one, any page the user was visiting could read the whole
+   fleet's logs out of their browser.

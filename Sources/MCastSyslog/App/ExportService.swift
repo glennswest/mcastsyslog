@@ -56,6 +56,7 @@ public enum ExportFormatter {
     public static func json(_ event: LogEvent) -> [String: Any] {
         var object: [String: Any] = [
             "recv_ns": event.recvNanos,
+            "id": event.id,
             "recv": Timestamp.format(event.recvNanos, style: .rfc3339UTC),
             "host": event.host,
             "tag": event.tag,
@@ -73,6 +74,10 @@ public enum ExportFormatter {
         if !names.isEmpty { object["flags"] = names }
         if let repeated = event.repeated { object["repeated"] = repeated }
         if let raw = event.raw { object["raw_base64"] = raw.base64EncodedString() }
+        // The id is this viewer's row number, which is what `/events/{id}`
+        // addresses. It means nothing in another viewer's store, so it is
+        // written but deliberately ignored on import.
+        if event.id == 0 { object.removeValue(forKey: "id") }
         return object
     }
 
