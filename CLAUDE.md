@@ -6,7 +6,7 @@ work plan, version info and project-specific context.
 
 ## Version
 
-**0.1.0** (pre-release, in initial development)
+**0.1.0** — released 2026-08-24. Pre-1.0, so the API is not yet stable.
 
 Version locations that must match:
 - `Sources/MCastSyslog/Support/Version.swift` — `AppVersion.current`
@@ -69,7 +69,7 @@ already on the machine. `docs/SPEC.md` has been amended accordingly.
 - [x] Tests — parser, store, query, retention
 - [x] Build, run, verify against `stormsim`
 - [x] REST API — retrieve, search, types, summary, stats, live SSE, console
-- [ ] v0.1.0 release
+- [x] v0.1.0 release
 
 ## Non-negotiables from the spec
 
