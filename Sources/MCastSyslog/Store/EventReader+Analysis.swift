@@ -31,10 +31,16 @@ extension EventReader {
             // upstream drifts, and treating that as a boot snapped the window
             // to a 35-second ntpd adjustment and analysed two events.
             let markers = try lifecycle(from: fromNanos, to: toNanos, hosts: hosts, policy: policy).markers
-            // Stated and inferred boots both count; boundaries milliseconds
-            // apart are the same boot seen twice and collapse to one.
-            let boundaries = EventReader.coalesceBoots(markers)
-            if let latestBoot = boundaries.filter({ $0 > fromNanos && $0 < toNanos }).max() {
+            // Anchoring is a different question from segmenting. For segmenting,
+            // stated and inferred boots both count. For choosing *the* boot to
+            // start at, a stated one wins outright when the window has any: a
+            // node that logs sporadically produces inferred boots wherever it
+            // was quiet, and anchoring on the latest of those landed on an ntpd
+            // adjustment with two events after it while the real boot — which
+            // the kernel had announced — sat half an hour earlier.
+            let stated = markers.filter { $0.marker == .kernelBoot }.map(\.recvNanos)
+            let candidates = stated.isEmpty ? EventReader.coalesceBoots(markers) : stated
+            if let latestBoot = candidates.filter({ $0 > fromNanos && $0 < toNanos }).max() {
                 fromNanos = latestBoot
             }
         }

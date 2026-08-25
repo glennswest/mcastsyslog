@@ -1,0 +1,12 @@
+{
+  "name": "stormcos",
+  "owner": {
+    "name": "stormcos"
+  },
+  "plugins": [
+    {
+      "source": "./mcastsyslog",
+      "description": "Read a stormcos fleet's multicast syslog: search, tail, analyse a boot or a crash, and see what every node was saying at one moment."
+    }
+  ]
+}
