@@ -7,6 +7,15 @@ All notable changes to mcastsyslog are recorded here. The format follows
 ## [Unreleased]
 
 ### 2026-08-24
+- **fix:** `PRAGMA auto_vacuum` was being set after `journal_mode = WAL`, which
+  makes SQLite accept it and silently do nothing — even on a database with no
+  tables. Retention would delete rows forever while the file never shrank, so
+  the size budget could never be met. The pragma order is now load-bearing and
+  says so, an existing database is converted with a one-time VACUUM on the
+  retention queue, and the size loop stops if a pass reclaims nothing rather
+  than grinding the corpus away against a budget it cannot reach.
+- **test:** 60 tests over the parser, timestamps, the store, filter/SQL
+  agreement and the export encoding.
 - **feat:** Wire layer — `LogEvent`, `Severity`, a tolerant byte-level RFC 5424
   parser that never drops a frame, and `Timestamp` parsing/rendering that keeps
   the microseconds the node sends.

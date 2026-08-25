@@ -66,6 +66,12 @@ public final class EventStore: @unchecked Sendable {
     }
 
     private func configure(_ connection: SQLiteConnection) throws {
+        // This must come first, and the order is not a style choice: once
+        // journal_mode is WAL, SQLite accepts `PRAGMA auto_vacuum` and silently
+        // does nothing with it, even on a database with no tables yet. Get that
+        // wrong and retention deletes rows forever while the file never gets
+        // smaller — a size budget that can never be met.
+        try connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
         // WAL so a reader never blocks the writer, and a long scan in the UI
         // never stalls the stream coming off the wire.
         try connection.execute("PRAGMA journal_mode = WAL")
@@ -73,9 +79,6 @@ public final class EventStore: @unchecked Sendable {
         // must never be slow, and the node's own file still has every line we
         // could lose on a hard power cut.
         try connection.execute("PRAGMA synchronous = NORMAL")
-        // Without this, retention deletes free pages inside the file and the
-        // file never gets smaller — a 2 GiB budget that only ever grows.
-        try connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
         try connection.execute("PRAGMA temp_store = MEMORY")
         try connection.execute("PRAGMA cache_size = -32000")   // 32 MiB
         try connection.execute("PRAGMA foreign_keys = OFF")
@@ -239,9 +242,21 @@ public final class EventStore: @unchecked Sendable {
                 result.reason = "older than \(policy.maxAgeDays) days"
             }
 
+            try ensureIncrementalVacuum()
+
             var passes = 0
+            var previousBytes = Int64.max
             while try fileBytes() > policy.maxBytes, passes < 12 {
                 passes += 1
+                let bytesAtStart = try fileBytes()
+                // If a pass frees nothing, deleting more will not help either —
+                // stop rather than grinding the corpus away against a budget
+                // that cannot be met.
+                guard bytesAtStart < previousBytes else {
+                    result.reason = "could not reclaim space below \(ByteCount.format(policy.maxBytes))"
+                    break
+                }
+                previousBytes = bytesAtStart
                 // ids are monotonic and only ever deleted from the front, so
                 // this finds the oldest tenth without a COUNT over the corpus.
                 let lo = try writer.scalarInt("SELECT COALESCE(MIN(id), 0) FROM events")
@@ -278,6 +293,16 @@ public final class EventStore: @unchecked Sendable {
         stmt.bind(1, cutoffId)
         _ = try writer.transaction { try stmt.step() }
         return Int64(sqlite3_changes(writer.handle))
+    }
+
+    /// A database created before the pragma ordering above was right still has
+    /// auto_vacuum off, and the only way to turn it on afterwards is a full
+    /// VACUUM. Done here rather than at open: retention already runs on a
+    /// background queue, and it is the one operation that needs it.
+    private func ensureIncrementalVacuum() throws {
+        guard try writer.scalarInt("PRAGMA auto_vacuum") != 2 else { return }
+        try writer.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        try writer.execute("VACUUM")
     }
 
     /// Hand the freed pages back to the filesystem, a bounded slice at a time so

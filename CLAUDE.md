@@ -62,10 +62,10 @@ already on the machine. `docs/SPEC.md` has been amended accordingly.
 - [x] `Wire/` — event model and tolerant RFC 5424 parser
 - [x] `Net/` — multicast receiver, per-interface joins, re-join on change
 - [x] `Store/` — schema, batched writer, queries, FTS5 search, retention
-- [ ] `App/` — fleet view, event stream, filters, search, jump-to-moment, export
-- [ ] `stormsim` — synthetic traffic generator
-- [ ] Tests — parser, store, query, retention
-- [ ] Build, run, verify against `stormsim`
+- [x] `App/` — fleet view, event stream, filters, search, jump-to-moment, export
+- [x] `stormsim` — synthetic traffic generator
+- [x] Tests — parser, store, query, retention
+- [x] Build, run, verify against `stormsim`
 - [ ] v0.1.0 release
 
 ## Non-negotiables from the spec
