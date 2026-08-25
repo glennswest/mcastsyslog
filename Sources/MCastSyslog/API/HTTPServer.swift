@@ -79,8 +79,13 @@ public enum RouteResult {
 
 /// A held-open Server-Sent Events connection.
 public final class EventStreamHandle: @unchecked Sendable {
-    fileprivate var write: ((Data) -> Void)?
-    fileprivate var closed = false
+    private var write: ((Data) -> Void)?
+    private var closed = false
+    /// Anything sent before the response headers have gone out. The router
+    /// greets a subscriber the moment it registers it, which is necessarily
+    /// before the connection has been handed a writer — without this the
+    /// greeting would be written into nothing.
+    private var pending = Data()
     private let lock = NSLock()
     /// Called when the client goes away, so the router can unsubscribe.
     public var onClose: (() -> Void)?
@@ -95,10 +100,18 @@ public final class EventStreamHandle: @unchecked Sendable {
     }
 
     public func send(raw: String) {
+        let data = Data(raw.utf8)
         lock.lock()
-        let writer = closed ? nil : write
+        guard !closed else { lock.unlock(); return }
+        guard let writer = write else {
+            // Bounded: a subscriber that never gets a writer is a connection
+            // that failed, and it must not be able to grow a buffer for it.
+            if pending.count < 256 * 1024 { pending.append(data) }
+            lock.unlock()
+            return
+        }
         lock.unlock()
-        writer?(Data(raw.utf8))
+        writer(data)
     }
 
     public func close() {
@@ -109,8 +122,13 @@ public final class EventStreamHandle: @unchecked Sendable {
         onClose?()
     }
 
-    fileprivate func attach(_ writer: @escaping (Data) -> Void) {
-        lock.lock(); write = writer; lock.unlock()
+    func attach(_ writer: @escaping (Data) -> Void) {
+        lock.lock()
+        write = writer
+        let backlog = pending
+        pending = Data()
+        lock.unlock()
+        if !backlog.isEmpty { writer(backlog) }
     }
 
     /// True once the client has gone away, so a broadcaster can drop it
@@ -338,11 +356,6 @@ public final class HTTPServer: @unchecked Sendable {
         head += "Connection: keep-alive\r\n"
         head += "X-Content-Type-Options: nosniff\r\n\r\n"
 
-        stream.attach { [weak connection] data in
-            guard let connection else { return }
-            connection.send(content: data, completion: .contentProcessed { _ in })
-        }
-
         connection.stateUpdateHandler = { state in
             switch state {
             case .failed, .cancelled: stream.close()
@@ -352,6 +365,11 @@ public final class HTTPServer: @unchecked Sendable {
 
         connection.send(content: Data(head.utf8), completion: .contentProcessed { error in
             if error != nil { stream.close(); connection.cancel(); return }
+            // Only now is it safe to flush: the headers are on the wire, so
+            // whatever the router queued at subscribe time follows them.
+            stream.attach { [weak connection] data in
+                connection?.send(content: data, completion: .contentProcessed { _ in })
+            }
             stream.send(raw: ": listening\n\n")
         })
 

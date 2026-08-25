@@ -12,6 +12,10 @@ All notable changes to mcastsyslog are recorded here. The format follows
   and a Server-Sent Events live tail. Filters parse into the same `FilterState`
   the window uses, so HTTP and the UI cannot give different answers. Off by
   default, bound to `127.0.0.1`, no CORS header. Documented in `docs/API.md`.
+- **fix:** The SSE greeting was written before the connection had a writer, so
+  it was dropped — a subscriber is registered, and greeted, before the response
+  headers can go out. Sends made before the writer exists are now buffered
+  (bounded) and flushed once the headers are on the wire.
 - **feat:** A small browser console at `/`, so the API is usable without
   writing a client first.
 - **fix:** The event JSON encoding never emitted `id`, which made the

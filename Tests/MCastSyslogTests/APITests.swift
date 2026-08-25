@@ -299,6 +299,69 @@ final class APITests: XCTestCase {
         }
     }
 
+    // MARK: - The live tail
+
+    func testTheLiveStreamDeliversOnlyWhatTheFilterMatches() throws {
+        let handle = EventStreamHandle()
+        let received = Received()
+        handle.attach { received.append($0) }
+
+        var filter = FilterState()
+        filter.severities = [.error]
+        context.live.subscribe(handle, filter: filter, ordering: .senderTime)
+        XCTAssertEqual(context.live.subscriberCount, 1)
+
+        context.live.publish([
+            event(10, host: "storm-01", tag: "t", severity: .info, message: "ordinary"),
+            event(11, host: "storm-01", tag: "t", severity: .error, message: "ERROR the interesting one"),
+        ])
+
+        let text = received.text
+        XCTAssertTrue(text.contains("ERROR the interesting one"))
+        XCTAssertFalse(text.contains("ordinary"), "an event the filter excludes must not be pushed")
+        XCTAssertTrue(text.contains("event: log\ndata: "), "framed as Server-Sent Events")
+    }
+
+    func testAGreetingSentBeforeTheHeadersStillArrives() throws {
+        // The router greets a subscriber the moment it registers it, which is
+        // necessarily before the connection has a writer.
+        let handle = EventStreamHandle()
+        handle.send(event: "hello", json: ["version": AppVersion.current])
+
+        let received = Received()
+        handle.attach { received.append($0) }
+        XCTAssertTrue(received.text.contains("event: hello"),
+                      "queued before the writer existed, flushed when it arrived")
+    }
+
+    func testAClosedSubscriberIsDroppedRatherThanWrittenTo() throws {
+        let handle = EventStreamHandle()
+        let received = Received()
+        handle.attach { received.append($0) }
+        context.live.subscribe(handle, filter: FilterState(), ordering: .senderTime)
+
+        handle.close()
+        XCTAssertEqual(context.live.subscriberCount, 0, "closing unsubscribes")
+
+        context.live.publish([event(12, host: "h", tag: "t", severity: .error, message: "after the close")])
+        XCTAssertFalse(received.text.contains("after the close"))
+    }
+
+    /// Collects what a stream handle writes, from whichever queue writes it.
+    private final class Received: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ chunk: Data) {
+            lock.lock(); data.append(chunk); lock.unlock()
+        }
+
+        var text: String {
+            lock.lock(); defer { lock.unlock() }
+            return String(decoding: data, as: UTF8.self)
+        }
+    }
+
     // MARK: - Request parsing
 
     func testRequestParsingHandlesTheFormsClientsSend() throws {
