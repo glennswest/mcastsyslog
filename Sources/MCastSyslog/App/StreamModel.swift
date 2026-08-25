@@ -40,6 +40,8 @@ public final class StreamModel: ObservableObject {
     @Published public private(set) var unseen: Int = 0
     @Published public private(set) var eventsPerSecond: Double = 0
     @Published public private(set) var storeError: String?
+    @Published public private(set) var apiRunning = false
+    @Published public private(set) var apiError: String?
 
     // What the user is doing.
     @Published public var filter = FilterState() { didSet { filterChanged(from: oldValue) } }
@@ -53,6 +55,8 @@ public final class StreamModel: ObservableObject {
     private var reader: EventReader?
     private var summaryReader: EventReader?
     private let multicast = MulticastReceiver()
+    private var apiContext: APIContext?
+    private let apiServer = HTTPServer()
 
     private let queryQueue = DispatchQueue(label: "lo.stormcos.mcastsyslog.query", qos: .userInitiated)
     private let summaryQueue = DispatchQueue(label: "lo.stormcos.mcastsyslog.summary", qos: .utility)
@@ -80,17 +84,30 @@ public final class StreamModel: ObservableObject {
     // MARK: - Startup
 
     private func open() {
+        let apiContext: APIContext
         do {
             let path = try EventStore.defaultPath()
             let store = try EventStore(path: path)
             self.store = store
             self.reader = try store.makeReader()
             self.summaryReader = try store.makeReader()
+            apiContext = APIContext(store: store, receiver: multicast)
         } catch {
             storeError = "\(error)"
             state = .failed("\(error)")
             return
         }
+
+        self.apiContext = apiContext
+        apiServer.route = APIRouter(context: apiContext).route
+        apiServer.onStateChange = { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.apiRunning = self.apiServer.isRunning
+                self.apiError = error
+            }
+        }
+        publishSettingsToAPI()
 
         multicast.onBatch = { [weak self] batch in
             // On the receiver's delivery queue. Write first, then show — an
@@ -102,6 +119,9 @@ public final class StreamModel: ObservableObject {
             } catch {
                 Task { @MainActor in self.storeError = "\(error)" }
             }
+            // Live subscribers see it only after it is stored, so the tail and
+            // the history can never disagree about what happened.
+            apiContext.live.publish(batch)
             self.enqueueForDisplay(batch)
         }
         multicast.onStatus = { [weak self] status in
@@ -112,13 +132,17 @@ public final class StreamModel: ObservableObject {
         refreshSummaries()
         refresh()
         if settings.startListeningOnLaunch { startListening() }
+        if settings.apiEnabled { startAPI() }
     }
 
     private func startTimers() {
         // The fleet, the store size and the filter menus. Two seconds is often
         // enough to feel live and rare enough to cost nothing.
         timers.append(Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshSummaries() }
+            Task { @MainActor in
+                self?.refreshSummaries()
+                self?.publishSettingsToAPI()
+            }
         })
         // Retention. Rarely has anything to do, and when it does it is one
         // range delete.
@@ -129,6 +153,34 @@ public final class StreamModel: ObservableObject {
 
     deinit {
         for timer in timers { timer.invalidate() }
+    }
+
+    // MARK: - The REST API
+
+    public func startAPI() {
+        publishSettingsToAPI()
+        apiServer.start(settings.apiConfiguration)
+    }
+
+    public func stopAPI() {
+        apiContext?.live.closeAll()
+        apiServer.stop()
+        apiRunning = false
+    }
+
+    public func restartAPI() {
+        stopAPI()
+        guard settings.apiEnabled else { return }
+        startAPI()
+    }
+
+    /// The API runs on its own queue and must never read main-actor state from
+    /// there, so what it is allowed to report is snapshotted to it instead.
+    private func publishSettingsToAPI() {
+        var snapshot = APIContext.Snapshot()
+        snapshot.endpoint = settings.endpoint
+        snapshot.retention = settings.retention
+        apiContext?.update(snapshot)
     }
 
     // MARK: - Listening

@@ -7,6 +7,8 @@ struct SettingsView: View {
                 .tabItem { Label("Listening", systemImage: "antenna.radiowaves.left.and.right") }
             StorageSettings()
                 .tabItem { Label("Storage", systemImage: "internaldrive") }
+            APISettings()
+                .tabItem { Label("REST API", systemImage: "curlybraces") }
             AboutPane()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
@@ -167,6 +169,104 @@ struct StorageSettings: View {
         guard let path = try? EventStore.defaultPath() else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
+}
+
+/// The read-only HTTP API. Off by default, loopback by default — both because
+/// this serves everything the viewer has heard from every node, and neither
+/// should happen because nobody thought about it.
+struct APISettings: View {
+    @EnvironmentObject private var model: StreamModel
+    @EnvironmentObject private var settings: AppSettings
+    @State private var confirmRemote = false
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Serve the REST API", isOn: $settings.apiEnabled)
+                LabeledContent("Port") {
+                    TextField("", value: $settings.apiPort, format: .number.grouping(.never))
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(width: 80)
+                }
+                LabeledContent("Address") {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(model.apiRunning ? Color(nsColor: .systemGreen) : Color(nsColor: .systemGray))
+                            .frame(width: 7, height: 7)
+                        if model.apiRunning {
+                            Link(settings.apiBaseURL, destination: URL(string: settings.apiBaseURL)!)
+                                .font(.system(size: 12, design: .monospaced))
+                        } else {
+                            Text(settings.apiBaseURL)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let error = model.apiError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color(nsColor: .systemRed))
+                        .font(.callout)
+                }
+            } header: {
+                Text("Serving")
+            } footer: {
+                Text("Read-only: only GET and HEAD are answered, and nothing the API can reach has a path back to a node.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Reachable from other machines", isOn: Binding(
+                    get: { settings.apiAllowRemote },
+                    set: { on in
+                        if on { confirmRemote = true } else { settings.apiAllowRemote = false }
+                    }
+                ))
+            } footer: {
+                Text(settings.apiAllowRemote
+                     ? "Serving on every interface. Anything that can reach this Mac can read every line this viewer has heard from every node — there is no authentication."
+                     : "Bound to 127.0.0.1. Nothing off this machine can reach it.")
+                    .font(.callout)
+                    .foregroundStyle(settings.apiAllowRemote ? Color(nsColor: .systemOrange) : .secondary)
+            }
+
+            Section("Try it") {
+                ForEach(Self.examples, id: \.0) { example in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(example.0).font(.callout)
+                        Text(example.1)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: settings.apiEnabled) { model.restartAPI() }
+        .onChange(of: settings.apiPort) { model.restartAPI() }
+        .onChange(of: settings.apiAllowRemote) { model.restartAPI() }
+        .confirmationDialog("Serve on every interface?", isPresented: $confirmRemote, titleVisibility: .visible) {
+            Button("Serve on every interface", role: .destructive) { settings.apiAllowRemote = true }
+            Button("Keep it on this Mac", role: .cancel) { settings.apiAllowRemote = false }
+        } message: {
+            Text("There is no authentication. Anything that can reach this Mac would be able to read every line this viewer has heard from every node in the fleet.")
+        }
+    }
+
+    private static let examples: [(String, String)] = [
+        ("Everything a node said in the last 15 minutes",
+         "curl 'localhost:8514/api/v1/events?host=storm-01&last=15m'"),
+        ("Errors and worse, across the fleet",
+         "curl 'localhost:8514/api/v1/events?min_severity=error&limit=50'"),
+        ("What surrounded a moment, on every node",
+         "curl 'localhost:8514/api/v1/around?at=2026-08-24T21:47:11Z&window=30'"),
+        ("A rollup of the last hour",
+         "curl 'localhost:8514/api/v1/summary?last=1h'"),
+        ("Follow the live tail",
+         "curl -N 'localhost:8514/api/v1/stream?min_severity=warning'"),
+    ]
 }
 
 struct AboutPane: View {

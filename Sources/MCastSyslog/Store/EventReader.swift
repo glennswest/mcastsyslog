@@ -18,6 +18,29 @@ public struct FleetNode: Identifiable, Hashable, Sendable {
     public var id: String { host }
 }
 
+/// A rollup over whatever a query matches.
+public struct EventSummary: Sendable {
+    public var total: Int64 = 0
+    public var bySeverity: [(severity: Severity, count: Int64)] = []
+    public var byHost: [(host: String, count: Int64, worst: Severity)] = []
+    public var byTag: [(tag: String, count: Int64, worst: Severity)] = []
+    public var malformed: Int64 = 0
+    public var clockUnset: Int64 = 0
+    public var collapsedRepeats: Int64 = 0
+    public var rateLimited: Int64 = 0
+    /// The sum of the counts on collapsed-repeat and rate-limit notices: lines
+    /// the node is telling us about but did not send.
+    public var linesAccountedFor: Int64 = 0
+    public var firstNanos: Int64?
+    public var lastNanos: Int64?
+
+    /// Events per second over the span they actually cover.
+    public var rate: Double {
+        guard let first = firstNanos, let last = lastNanos, last > first else { return 0 }
+        return Double(total) / (Double(last - first) / 1e9)
+    }
+}
+
 /// What a query cost, so the viewer can be honest about it.
 public struct QueryOutcome: Sendable {
     public var events: [LogEvent] = []
@@ -199,6 +222,80 @@ public final class EventReader: @unchecked Sendable {
             ))
         }
         return nodes
+    }
+
+    /// One event by id, for `/events/{id}`.
+    public func event(id: Int64) throws -> LogEvent? {
+        beginQuery()
+        let stmt = try connection.prepare("SELECT \(Self.columns) FROM events e WHERE e.id = ?")
+        defer { stmt.finalize() }
+        stmt.bind(1, id)
+        return try stmt.step() ? Self.decode(stmt) : nil
+    }
+
+    /// A rollup of what matches: how much, how bad, from whom, about what.
+    ///
+    /// Four grouped scans over the same predicate rather than one pass in
+    /// Swift, because each one is an index range the database already knows how
+    /// to walk, and none of them brings a row across the boundary.
+    public func summary(_ query: EventQuery) throws -> EventSummary {
+        beginQuery()
+        let predicate = QueryPredicate(query)
+        let join = predicate.needsFTSJoin ? "JOIN events_fts f ON f.rowid = e.id" : ""
+
+        func grouped(_ column: String, limit: Int) throws -> [(String, Int64, Severity)] {
+            let sql = """
+                SELECT e.\(column), COUNT(*), MIN(e.severity) FROM events e \(join)
+                WHERE \(predicate.sql)
+                GROUP BY e.\(column)
+                ORDER BY COUNT(*) DESC
+                LIMIT ?
+                """
+            let stmt = try connection.prepare(sql)
+            defer { stmt.finalize() }
+            stmt.bind(bind(predicate.bindings, to: stmt), Int64(limit))
+            var rows: [(String, Int64, Severity)] = []
+            while try stmt.step() {
+                rows.append((stmt.string(0), stmt.int(1), Severity(clamping: Int(stmt.int(2)))))
+            }
+            return rows
+        }
+
+        var summary = EventSummary()
+        summary.bySeverity = try grouped("severity", limit: 8).map {
+            (Severity(clamping: Int($0.0) ?? 6), $0.1)
+        }
+        summary.byHost = try grouped("host", limit: 200).map { ($0.0, $0.1, $0.2) }
+        summary.byTag = try grouped("tag", limit: 200).map { ($0.0, $0.1, $0.2) }
+
+        let flagsSQL = """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN (e.flags & \(EventFlags.malformed.rawValue)) != 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN (e.flags & \(EventFlags.clockUnset.rawValue)) != 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN (e.flags & \(EventFlags.repeatNotice.rawValue)) != 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN (e.flags & \(EventFlags.rateLimitNotice.rawValue)) != 0 THEN 1 ELSE 0 END),
+                   MIN(e.\(query.timeColumn)), MAX(e.\(query.timeColumn)),
+                   COALESCE(SUM(e.repeated), 0)
+            FROM events e \(join)
+            WHERE \(predicate.sql)
+            """
+        let stmt = try connection.prepare(flagsSQL)
+        defer { stmt.finalize() }
+        _ = bind(predicate.bindings, to: stmt)
+        if try stmt.step() {
+            summary.total = stmt.int(0)
+            summary.malformed = stmt.int(1)
+            summary.clockUnset = stmt.int(2)
+            summary.collapsedRepeats = stmt.int(3)
+            summary.rateLimited = stmt.int(4)
+            summary.firstNanos = stmt.intOrNil(5)
+            summary.lastNanos = stmt.intOrNil(6)
+            // What the node held back or collapsed. Lines that exist and are not
+            // here, which is worth stating rather than leaving to be inferred
+            // from a gap.
+            summary.linesAccountedFor = stmt.int(7)
+        }
+        return summary
     }
 
     /// Every host ever heard from, whether or not it is talking now. A node that
