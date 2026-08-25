@@ -264,7 +264,7 @@ public final class EventStore: @unchecked Sendable {
         let stmt = try writer.prepare("DELETE FROM events WHERE recv_ns < ?")
         defer { stmt.finalize() }
         stmt.bind(1, cutoffNanos)
-        try writer.transaction {
+        _ = try writer.transaction {
             try stmt.step()
             try writer.execute("DELETE FROM hosts WHERE last_ns < \(cutoffNanos)")
             try writer.execute("DELETE FROM tags WHERE last_ns < \(cutoffNanos)")
@@ -276,7 +276,7 @@ public final class EventStore: @unchecked Sendable {
         let stmt = try writer.prepare("DELETE FROM events WHERE id < ?")
         defer { stmt.finalize() }
         stmt.bind(1, cutoffId)
-        try writer.transaction { try stmt.step() }
+        _ = try writer.transaction { try stmt.step() }
         return Int64(sqlite3_changes(writer.handle))
     }
 

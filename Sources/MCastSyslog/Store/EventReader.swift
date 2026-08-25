@@ -240,7 +240,7 @@ public final class EventReader: @unchecked Sendable {
 
     // MARK: - Plumbing
 
-    private func bind(_ bindings: [Binding], to stmt: SQLiteStatement) -> Int32 {
+    private func bind(_ bindings: [SQLValue], to stmt: SQLiteStatement) -> Int32 {
         var index: Int32 = 1
         for binding in bindings {
             switch binding {

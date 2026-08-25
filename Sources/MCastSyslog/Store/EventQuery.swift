@@ -101,7 +101,11 @@ public struct EventQuery: Equatable, Sendable {
 }
 
 /// A value bound into a prepared statement.
-enum Binding {
+///
+/// Named `SQLValue` rather than the more obvious `Binding` because this module
+/// also contains SwiftUI views, and a file-scope `Binding` would shadow
+/// SwiftUI's in every one of them.
+enum SQLValue {
     case int(Int64)
     case text(String)
 }
@@ -110,12 +114,12 @@ enum Binding {
 /// the count and the export.
 struct QueryPredicate {
     var sql: String
-    var bindings: [Binding]
+    var bindings: [SQLValue]
     var needsFTSJoin: Bool
 
     init(_ query: EventQuery) {
         var clauses: [String] = []
-        var bindings: [Binding] = []
+        var bindings: [SQLValue] = []
 
         if let from = query.fromNanos {
             clauses.append("e.\(query.timeColumn) >= ?")
@@ -127,15 +131,15 @@ struct QueryPredicate {
         }
         if !query.hosts.isEmpty {
             clauses.append("e.host IN (\(Self.placeholders(query.hosts.count)))")
-            bindings.append(contentsOf: query.hosts.sorted().map { Binding.text($0) })
+            bindings.append(contentsOf: query.hosts.sorted().map { SQLValue.text($0) })
         }
         if !query.tags.isEmpty {
             clauses.append("e.tag IN (\(Self.placeholders(query.tags.count)))")
-            bindings.append(contentsOf: query.tags.sorted().map { Binding.text($0) })
+            bindings.append(contentsOf: query.tags.sorted().map { SQLValue.text($0) })
         }
         if !query.severities.isEmpty {
             clauses.append("e.severity IN (\(Self.placeholders(query.severities.count)))")
-            bindings.append(contentsOf: query.severities.sorted().map { Binding.int(Int64($0.rawValue)) })
+            bindings.append(contentsOf: query.severities.sorted().map { SQLValue.int(Int64($0.rawValue)) })
         }
         if !query.requiredFlags.isEmpty {
             clauses.append("(e.flags & ?) = ?")
