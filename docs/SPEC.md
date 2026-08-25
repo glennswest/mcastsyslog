@@ -1,6 +1,6 @@
 # mcastsyslog — a viewer for a fleet that is talking
 
-**Status:** specification. Nothing here is built yet.
+**Status:** implemented. See the repository root for the application.
 
 ## The problem it solves
 
@@ -86,39 +86,70 @@ A macOS app. Native SwiftUI; no Electron, no browser, no server to run.
 
 ### Storing
 
-[redb](https://github.com/cberner/redb) — an embedded, single-file,
-transactional key–value store. Chosen because the alternative to embedding a
+SQLite, through the `libsqlite3` already on the machine — an embedded,
+single-file, transactional store. Chosen because the alternative to embedding a
 store is inventing one, and this is a log viewer, not a database.
 
-Tables:
+> **Amended 2026-08-24.** This section originally specified
+> [redb](https://github.com/cberner/redb). redb is a Rust crate, and the viewer
+> is a Swift application; keeping it would have meant a Rust core behind a C
+> ABI for no gain in the shape below. Every structural decision here — ordered
+> composite keys, filters as index intersections, retention as a
+> front-truncating range delete — survived the move unchanged, because they are
+> properties of the access pattern, not of the store.
 
-| Table | Key | Value |
-|---|---|---|
-| `events` | `(recv_ns: u64, seq: u32)` | encoded event |
-| `by_host` | `(host, recv_ns, seq)` | () |
-| `by_tag` | `(tag, recv_ns, seq)` | () |
-| `by_sev` | `(sev, recv_ns, seq)` | () |
-| `tokens` | `(token, recv_ns, seq)` | () |
-| `meta` | `"schema"`, `"retention"`, … | value |
+```sql
+CREATE TABLE events (
+    id        INTEGER PRIMARY KEY,   -- monotonic at the viewer; the tiebreak
+    recv_ns   INTEGER NOT NULL,      -- receive time, Unix ns. Never null.
+    sent_ns   INTEGER,               -- sender's time. NULL when the frame said `-`.
+    host      TEXT    NOT NULL,
+    tag       TEXT    NOT NULL,
+    severity  INTEGER NOT NULL,
+    facility  INTEGER NOT NULL,
+    flags     INTEGER NOT NULL,      -- malformed | clockUnset | repeat | rateLimit
+    repeated  INTEGER,               -- N, on a collapsed-repeat or dropped notice
+    source    TEXT    NOT NULL,      -- the address the datagram actually came from
+    message   TEXT    NOT NULL,
+    raw       BLOB                   -- the frame verbatim, kept when malformed
+);
 
-The primary key is receive time, not sender time: it is monotonic at the
-viewer, it is never nil, and it is the only ordering that cannot be perturbed
+CREATE INDEX events_by_time ON events (recv_ns, id);
+CREATE INDEX events_by_host ON events (host, recv_ns, id);
+CREATE INDEX events_by_tag  ON events (tag,  recv_ns, id);
+CREATE INDEX events_by_sev  ON events (severity, recv_ns, id);
+CREATE INDEX events_by_sent ON events (sent_ns, id);
+
+CREATE VIRTUAL TABLE events_fts USING fts5 (
+    message, content='events', content_rowid='id', tokenize='unicode61'
+);
+```
+
+The clustering key is receive time, not sender time: it is monotonic at the
+viewer, it is never null, and it is the only ordering that cannot be perturbed
 by a node with a wrong clock. Sender time is a field, indexed for range queries
-when it is present.
+when it is present. `id` disambiguates events arriving in the same nanosecond.
 
-`seq` disambiguates events arriving in the same nanosecond.
+**Indexing** is ordered indexes over `(field, recv_ns, id)`, not an inverted
+index of documents. A range scan on `events_by_host` for a host gives its
+events in time order for free, and combining filters is an intersection of
+ordered index ranges — which is exactly the plan SQLite produces for them.
 
-**Indexing** is index tables of keys, not an inverted index of documents. A
-range scan on `by_host` for a host gives its events in time order for free, and
-combining filters is an intersection of ordered key ranges. `tokens` holds
-lowercased word-ish runs from the message (bounded: first 64 tokens of a line,
-minimum length 3), which makes "search" a prefix scan rather than a full read.
-Substring search that does not hit a token boundary falls back to a scan over
-the time range being viewed — bounded by what is on screen, not by the corpus.
+**Search** is FTS5 over the message, which makes token search a prefix lookup
+rather than a full read. Substring search that does not fall on a token
+boundary falls back to a scan over the time range being viewed — bounded by
+what is on screen, not by the corpus, announced as a scan, and cancellable.
 
 **Retention** is by size and age, whichever comes first, defaulting to 2 GiB or
-30 days. Enforced by dropping whole time ranges from the front, which is one
-range delete per table rather than a walk.
+30 days. Enforced by deleting a whole time range from the front, which is one
+range delete per index rather than a walk. The database is opened with
+`auto_vacuum=INCREMENTAL` so that a delete actually returns the space.
+
+Write settings: WAL, `synchronous=NORMAL`. Events are committed in batches, not
+one transaction per datagram — a transaction per datagram would put an fsync in
+a path that must never be slow, and losing the last few milliseconds of a
+stream on a hard power cut costs nothing the node's own file does not still
+have.
 
 ### Viewing
 
@@ -126,7 +157,7 @@ The properties that matter, in order:
 
 1. **Live tail that keeps up.** New events append to the view without
    re-querying. The receiving path never touches the UI thread; the UI reads a
-   ring of recent events and a redb snapshot for anything older.
+   ring of recent events and a read-only database snapshot for anything older.
 2. **Filter without re-typing.** Host, tag, severity and time range are
    controls, not query syntax, and they compose. Every filter is an index
    intersection, so narrowing is fast even at millions of events.

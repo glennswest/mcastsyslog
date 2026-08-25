@@ -3,9 +3,9 @@
 A macOS viewer for a fleet of stormcos nodes that are talking.
 
 Nodes emit RFC 5424 syslog to a multicast group and do not know or care who is
-listening. This joins the group, stores what it hears in an embedded
-[redb](https://github.com/cberner/redb) database, and shows it live — filtered,
-searched and indexed, across every node at once.
+listening. This joins the group, stores what it hears in an embedded SQLite
+database, and shows it live — filtered, searched and indexed, across every node
+at once.
 
 The design constraint that shapes everything: **nothing on a node may ever wait
 on logging.** A console with no reader blocks on its first full buffer, and
