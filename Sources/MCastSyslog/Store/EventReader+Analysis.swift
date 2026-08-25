@@ -30,7 +30,6 @@ extension EventReader {
             // reboot — a node running ntpd steps its clock whenever the
             // upstream drifts, and treating that as a boot snapped the window
             // to a 35-second ntpd adjustment and analysed two events.
-            let markers = try lifecycle(from: fromNanos, to: toNanos, hosts: hosts, policy: policy).markers
             // Anchoring is a different question from segmenting. For segmenting,
             // stated and inferred boots both count. For choosing *the* boot to
             // start at, a stated one wins outright when the window has any: a
@@ -38,10 +37,15 @@ extension EventReader {
             // was quiet, and anchoring on the latest of those landed on an ntpd
             // adjustment with two events after it while the real boot — which
             // the kernel had announced — sat half an hour earlier.
-            let stated = markers.filter { $0.marker == .kernelBoot }.map(\.recvNanos)
-            let candidates = stated.isEmpty ? EventReader.coalesceBoots(markers) : stated
-            if let latestBoot = candidates.filter({ $0 > fromNanos && $0 < toNanos }).max() {
-                fromNanos = latestBoot
+            //
+            // Asked as its own query rather than by running the whole lifecycle
+            // scan: at three quarters of a million events that scan took eight
+            // seconds, and this takes a third of one.
+            if let stated = try latestStatedBoot(from: fromNanos, to: toNanos, host: hosts.first!) {
+                fromNanos = stated
+            } else if let inferred = try latestInferredBoot(
+                from: fromNanos, to: toNanos, host: hosts.first!, gap: policy.gapNanos) {
+                fromNanos = inferred
             }
         }
 
@@ -142,16 +146,20 @@ extension EventReader {
         // MARK: Gaps — where the time went
 
         do {
+            // Only `host` and `recv_ns` are selected, and only those are ordered
+            // by, so the whole walk is served out of the index on
+            // (host, recv_ns, id) without reading a single row. Selecting the
+            // message here as well — which is what this did first — forced a
+            // row lookup for every event in the window and cost ten times as
+            // much for ten rows of output.
             let stmt = try prepare("""
                 WITH walked AS (
-                    SELECT host, recv_ns, message,
-                           LAG(recv_ns)  OVER w AS prev_recv,
-                           LAG(message)  OVER w AS prev_message
+                    SELECT host, recv_ns, LAG(recv_ns) OVER w AS prev_recv
                     FROM events
                     WHERE recv_ns >= ? AND recv_ns <= ? \(hostClause)
-                    WINDOW w AS (PARTITION BY host ORDER BY id)
+                    WINDOW w AS (PARTITION BY host ORDER BY recv_ns, id)
                 )
-                SELECT host, prev_recv, recv_ns, prev_message
+                SELECT host, prev_recv, recv_ns
                 FROM walked
                 WHERE prev_recv IS NOT NULL AND recv_ns - prev_recv > ?
                 ORDER BY recv_ns - prev_recv DESC
@@ -164,8 +172,21 @@ extension EventReader {
             while try stmt.step() {
                 analysis.gaps.append(SequenceAnalysis.Gap(
                     afterNanos: stmt.int(1), untilNanos: stmt.int(2),
-                    host: stmt.string(0), lastMessage: stmt.string(3)))
+                    host: stmt.string(0), lastMessage: ""))
             }
+        }
+
+        // Now fetch the line before each of the ten, which is what the node was
+        // doing while it was quiet.
+        for index in analysis.gaps.indices {
+            let stmt = try prepare("""
+                SELECT message FROM events
+                WHERE host = ? AND recv_ns = ? ORDER BY id DESC LIMIT 1
+                """)
+            defer { stmt.finalize() }
+            stmt.bind(1, analysis.gaps[index].host)
+            stmt.bind(2, analysis.gaps[index].afterNanos)
+            if try stmt.step() { analysis.gaps[index].lastMessage = stmt.string(0) }
         }
 
         // MARK: The shape of it
@@ -195,11 +216,14 @@ extension EventReader {
         // MARK: Clock skew at the ends
 
         do {
+            // Ordered by recv_ns rather than id: both are arrival order, but
+            // only one of them is the index's own order, and sorting by the
+            // other built a temp b-tree over the whole window.
             for (isStart, column) in [(true, "ASC"), (false, "DESC")] {
                 let stmt = try prepare("""
                     SELECT recv_ns - sent_ns FROM events
                     WHERE recv_ns >= ? AND recv_ns <= ? \(hostClause) AND sent_ns IS NOT NULL
-                    ORDER BY id \(column) LIMIT 1
+                    ORDER BY recv_ns \(column) LIMIT 1
                     """)
                 defer { stmt.finalize() }
                 _ = bindWindow(stmt)
@@ -306,6 +330,52 @@ extension EventReader {
                                 note: "The set of workloads had stopped changing."))
         }
         return phases
+    }
+
+    /// The most recent boot the kernel announced, if there was one in the window.
+    ///
+    /// A scan of the host's own rows rather than an FTS lookup, which is
+    /// counter-intuitive but measured: `Linux version` appears in every boot of
+    /// every node, so the FTS posting list is enormous and carries no time or
+    /// host dimension to narrow it by. Going through the index on
+    /// `(host, recv_ns, id)` and testing the handful of rows in range took a
+    /// third of a second where FTS took eighteen.
+    func latestStatedBoot(from fromNanos: Int64, to toNanos: Int64, host: String) throws -> Int64? {
+        let stmt = try prepare("""
+            SELECT recv_ns FROM events
+            WHERE host = ? AND recv_ns > ? AND recv_ns < ? AND message LIKE 'Linux version %'
+            ORDER BY recv_ns DESC LIMIT 1
+            """)
+        defer { stmt.finalize() }
+        stmt.bind(1, host)
+        stmt.bind(2, fromNanos)
+        stmt.bind(3, toNanos)
+        return try stmt.step() ? stmt.int(0) : nil
+    }
+
+    /// The last silence long enough to have been a restart.
+    ///
+    /// The fallback for a node whose kernel banner is not in the window. Like
+    /// the gaps query, it selects only the columns the index already holds, so
+    /// it never reads a row. Running the whole lifecycle scan for this instead
+    /// made a thirty-minute window slower to analyse than a whole day's.
+    func latestInferredBoot(from fromNanos: Int64, to toNanos: Int64, host: String, gap: Int64) throws -> Int64? {
+        let stmt = try prepare("""
+            WITH walked AS (
+                SELECT recv_ns, LAG(recv_ns) OVER (ORDER BY recv_ns, id) AS prev_recv
+                FROM events
+                WHERE host = ? AND recv_ns >= ? AND recv_ns <= ?
+            )
+            SELECT recv_ns FROM walked
+            WHERE prev_recv IS NOT NULL AND recv_ns - prev_recv > ?
+            ORDER BY recv_ns DESC LIMIT 1
+            """)
+        defer { stmt.finalize() }
+        stmt.bind(1, host)
+        stmt.bind(2, fromNanos)
+        stmt.bind(3, toNanos)
+        stmt.bind(4, gap)
+        return try stmt.step() ? stmt.int(0) : nil
     }
 
     /// The leading run of debuts that arrive close enough together to be one

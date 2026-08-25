@@ -421,7 +421,7 @@ public final class StreamModel: ObservableObject {
         events = []
         unseen = 0
         summaryQueue.async {
-            try? store.deleteAll()
+            try? store.deleteAll(reason: "from the app")
             Task { @MainActor in
                 self.refreshSummaries()
                 self.refresh()

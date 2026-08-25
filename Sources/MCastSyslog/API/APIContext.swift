@@ -50,10 +50,14 @@ public final class APIContext: @unchecked Sendable {
 
     public func storeStats() throws -> StoreStats { try store.stats() }
 
+    /// What the store has recorded about itself — including what last deleted
+    /// from it, and why.
+    public func storeNotes() throws -> [String: String] { try store.notes() }
+
     /// The only thing the API can change, and only when three separate guards
     /// in `APIRouter.clear` all agree. Nothing here touches a node.
     public func clearStore() throws {
-        try store.deleteAll()
+        try store.deleteAll(reason: "over the REST API")
         onStoreCleared?()
     }
 

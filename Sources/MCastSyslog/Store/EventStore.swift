@@ -270,7 +270,12 @@ public final class EventStore: @unchecked Sendable {
                 try reclaim()
             }
 
-            if result.deleted > 0 { try reclaim() }
+            if result.deleted > 0 {
+                try reclaim()
+                try note("last_retention",
+                         "\(Timestamp.format(now, style: .rfc3339UTC)): "
+                         + "\(result.deleted) events — \(result.reason ?? "policy")")
+            }
             return result
         }
     }
@@ -338,15 +343,45 @@ public final class EventStore: @unchecked Sendable {
     }
 
     /// Everything, gone. Used by "Clear stored events" in the UI, which asks first.
-    public func deleteAll() throws {
+    public func deleteAll(reason: String = "requested") throws {
         try writeQueue.sync {
+            let before = try writer.scalarInt("SELECT COALESCE(COUNT(*), 0) FROM events")
             try writer.transaction {
                 try writer.execute("DELETE FROM events")
                 try writer.execute("DELETE FROM hosts")
                 try writer.execute("DELETE FROM tags")
             }
+            try note("cleared", "\(Timestamp.format(Timestamp.now(), style: .rfc3339UTC)): "
+                     + "\(before) events deleted — \(reason)")
             try writer.execute("PRAGMA incremental_vacuum")
             try writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+    }
+
+    /// Write a line into `meta` that survives everything else being deleted.
+    ///
+    /// The store lost three quarters of a million events once and left nothing
+    /// behind to say what had done it, which turned a five-minute question into
+    /// an hour of inference. Anything that destroys data writes down that it
+    /// did.
+    private func note(_ key: String, _ value: String) throws {
+        let stmt = try writer.prepare(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        defer { stmt.finalize() }
+        stmt.bind(1, key)
+        stmt.bind(2, value)
+        try stmt.step()
+    }
+
+    /// What the store last recorded about itself — including anything that
+    /// deleted from it.
+    public func notes() throws -> [String: String] {
+        try writeQueue.sync {
+            let stmt = try writer.prepare("SELECT key, value FROM meta ORDER BY key")
+            defer { stmt.finalize() }
+            var notes: [String: String] = [:]
+            while try stmt.step() { notes[stmt.string(0)] = stmt.string(1) }
+            return notes
         }
     }
 

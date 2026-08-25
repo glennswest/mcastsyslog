@@ -237,6 +237,10 @@ public struct APIRouter {
                     "version": AppVersion.current,
                     "live_subscribers": context.live.subscriberCount,
                 ],
+                // What last removed events, and why. Present so that a store
+                // that has emptied is never again something to be inferred
+                // after the fact.
+                "store_log": (try? context.storeNotes()) ?? [:],
             ])
         } catch {
             return .error(500, "Internal Server Error", "\(error)")

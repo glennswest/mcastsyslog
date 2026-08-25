@@ -89,10 +89,12 @@ struct MCastSyslogApp: App {
 
             Divider()
 
+            // Deliberately without a keyboard shortcut. A menu shortcut fires
+            // app-wide, including while a text field has focus, and this is the
+            // one action in the app that cannot be undone.
             Button("Clear Stored Events…") {
                 NotificationCenter.default.post(name: .mcastClearLog, object: nil)
             }
-            .keyboardShortcut(.delete, modifiers: [.command, .shift])
             .disabled(model.storeStats.events == 0)
         }
     }

@@ -6,6 +6,27 @@ All notable changes to mcastsyslog are recorded here. The format follows
 
 ## [Unreleased]
 
+### 2026-08-25
+- **perf:** `/api/v1/analysis` took twenty seconds at three quarters of a
+  million events and now takes three, and a hundred milliseconds on a small
+  window. Three causes: it ran the whole lifecycle scan just to find a boot to
+  anchor on, where a direct query for the kernel banner costs a third of a
+  second; the gaps query selected `message` inside its window function, forcing
+  a row read for every event in the window to produce ten rows of output;
+  and two lookups sorted by `id` where the index is ordered by `recv_ns`,
+  building a temp b-tree over the whole window each time. Measured, not
+  guessed — an FTS lookup for the boot banner was tried first and was *fifty
+  times slower* than the scan, because the phrase appears in every boot of
+  every node and the index carries no time or host dimension to narrow by.
+- **fix:** Removed the ⇧⌘⌫ shortcut from Clear Stored Events. A menu shortcut
+  fires app-wide, including while a text field has focus, and this is the one
+  action in the app that cannot be undone.
+- **feat:** Anything that deletes from the store now records that it did, in a
+  `meta` row that survives the deletion, and `/api/v1/stats` serves it as
+  `store_log`. The store lost three quarters of a million events during
+  development and left nothing behind to say what had done it, which turned a
+  five-minute question into an hour of inference.
+
 ## [v0.2.0] — 2026-08-25
 
 Everything in this release was shaped by running against a real fleet for the
