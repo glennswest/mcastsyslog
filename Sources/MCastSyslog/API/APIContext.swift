@@ -14,6 +14,11 @@ public final class APIContext: @unchecked Sendable {
     public struct Snapshot: Sendable {
         public var endpoint: ListenEndpoint = .default
         public var retention: RetentionPolicy = .default
+        /// Whether the one destructive endpoint is switched on at all.
+        public var allowClearing: Bool = false
+        /// Whether the API is reachable from other machines, which is what
+        /// makes clearing over it refuse regardless of the switch above.
+        public var servesRemotely: Bool = false
 
         public init() {}
     }
@@ -44,6 +49,17 @@ public final class APIContext: @unchecked Sendable {
     public var receiverStatus: ReceiverStatus { receiver.currentStatus }
 
     public func storeStats() throws -> StoreStats { try store.stats() }
+
+    /// The only thing the API can change, and only when three separate guards
+    /// in `APIRouter.clear` all agree. Nothing here touches a node.
+    public func clearStore() throws {
+        try store.deleteAll()
+        onStoreCleared?()
+    }
+
+    /// Set by the app so the window empties with the store rather than showing
+    /// rows that no longer exist.
+    public var onStoreCleared: (() -> Void)?
 
     /// Borrow a reader, and put it back. A handful of connections share a few
     /// connections to the database rather than opening one per request; a reader

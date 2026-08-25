@@ -231,6 +231,17 @@ struct APISettings: View {
                     .foregroundStyle(settings.apiAllowRemote ? Color(nsColor: .systemOrange) : .secondary)
             }
 
+            Section {
+                Toggle("Allow clearing the log over the API", isOn: $settings.apiAllowClearing)
+                    .disabled(settings.apiAllowRemote)
+            } footer: {
+                Text(settings.apiAllowRemote
+                     ? "Unavailable while the API serves on every interface. Clearing is only ever reachable over loopback."
+                     : "Adds GET /api/v1/clear?confirm=yes — the one endpoint that destroys something. Off unless you want a script or an agent to be able to wipe the store.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Try it") {
                 ForEach(Self.examples, id: \.0) { example in
                     VStack(alignment: .leading, spacing: 1) {
@@ -266,6 +277,10 @@ struct APISettings: View {
          "curl 'localhost:8514/api/v1/summary?last=1h'"),
         ("Follow the live tail",
          "curl -N 'localhost:8514/api/v1/stream?min_severity=warning'"),
+        ("Tail without a held-open connection",
+         "curl 'localhost:8514/api/v1/events?since_id=41207'"),
+        ("Boots, clock syncs, faults and silences",
+         "curl 'localhost:8514/api/v1/lifecycle?last=24h'"),
     ]
 }
 

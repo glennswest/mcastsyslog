@@ -116,6 +116,48 @@ public final class EventReader: @unchecked Sendable {
         return outcome
     }
 
+    /// The oldest matching events after a cursor, in arrival order.
+    ///
+    /// Ordered by id rather than by either timestamp: a cursor has to be over
+    /// something monotonic at the viewer, and a node's clock is not. An event
+    /// that arrives late still gets a higher id than everything already
+    /// returned, so a tail built on this cannot skip it.
+    public func fetchForward(_ query: EventQuery) throws -> QueryOutcome {
+        beginQuery()
+        let started = Timestamp.now()
+        let predicate = QueryPredicate(query)
+        let join = predicate.needsFTSJoin ? "JOIN events_fts f ON f.rowid = e.id" : ""
+        let sql = """
+            SELECT \(Self.columns) FROM events e \(join)
+            WHERE \(predicate.sql)
+            ORDER BY e.id ASC
+            LIMIT ?
+            """
+
+        var outcome = QueryOutcome()
+        outcome.scanned = query.requiresScan
+        do {
+            let stmt = try connection.prepare(sql)
+            defer { stmt.finalize() }
+            stmt.bind(bind(predicate.bindings, to: stmt), Int64(query.limit))
+            while try stmt.step() { outcome.events.append(Self.decode(stmt)) }
+        } catch {
+            if cancelled.value { outcome.cancelled = true } else { throw error }
+        }
+        outcome.truncated = outcome.events.count >= query.limit
+        outcome.elapsedNanos = Timestamp.now() - started
+        return outcome
+    }
+
+    /// The newest id in the store, so a tail can start from "now" rather than
+    /// from the beginning of history.
+    public func newestId() throws -> Int64 {
+        beginQuery()
+        let stmt = try connection.prepare("SELECT COALESCE(MAX(id), 0) FROM events")
+        defer { stmt.finalize() }
+        return try stmt.step() ? stmt.int(0) : 0
+    }
+
     /// Everything around a moment, on every node at once.
     ///
     /// This is the view that makes multicast worth having: one node's failure is
@@ -171,6 +213,193 @@ public final class EventReader: @unchecked Sendable {
         while try stmt.step() {
             try each(Self.decode(stmt))
         }
+    }
+
+    // MARK: - Lifecycle
+
+    /// Where each node's runs begin and end, and what it said at the seams.
+    ///
+    /// The boundary detection is done in SQL with a window function rather than
+    /// by walking every row in Swift: the interesting rows are a tiny fraction
+    /// of the corpus, and there is no reason to carry the rest across the
+    /// boundary to throw away.
+    public func lifecycle(
+        from fromNanos: Int64,
+        to toNanos: Int64,
+        hosts: Set<String> = [],
+        policy: LifecyclePolicy = .default,
+        ceiling: Int = 5000
+    ) throws -> LifecycleReport {
+        beginQuery()
+        var report = LifecycleReport(fromNanos: fromNanos, toNanos: toNanos)
+
+        var hostClause = ""
+        if !hosts.isEmpty {
+            hostClause = "AND host IN (\(QueryPredicate.placeholders(hosts.count)))"
+        }
+
+        // `prev_*` are the same node's previous event in arrival order. Arrival
+        // order, not either timestamp: it is the only ordering a node with a
+        // wrong clock cannot perturb, and a boot is precisely the moment a
+        // node's clock is least trustworthy.
+        let sql = """
+            WITH walked AS (
+                SELECT id, host, recv_ns, sent_ns, severity, flags, message,
+                       LAG(recv_ns) OVER w AS prev_recv,
+                       LAG(sent_ns) OVER w AS prev_sent,
+                       LAG(flags)   OVER w AS prev_flags
+                FROM events
+                WHERE recv_ns >= ? AND recv_ns <= ? \(hostClause)
+                WINDOW w AS (PARTITION BY host ORDER BY id)
+            )
+            SELECT id, host, recv_ns, sent_ns, severity, message, flags, prev_recv, prev_sent, prev_flags
+            FROM walked
+            WHERE prev_recv IS NULL
+               OR recv_ns - prev_recv > ?
+               OR (sent_ns IS NOT NULL AND prev_sent IS NOT NULL AND prev_sent - sent_ns > ?)
+               OR ((prev_flags & \(EventFlags.clockUnset.rawValue)) != 0
+                   AND (flags & \(EventFlags.clockUnset.rawValue)) = 0)
+               OR severity <= \(Severity.critical.rawValue)
+            ORDER BY id
+            LIMIT ?
+            """
+
+        let stmt = try connection.prepare(sql)
+        defer { stmt.finalize() }
+        var index: Int32 = 1
+        stmt.bind(index, fromNanos); index += 1
+        stmt.bind(index, toNanos); index += 1
+        for host in hosts.sorted() { stmt.bind(index, host); index += 1 }
+        stmt.bind(index, policy.gapNanos); index += 1
+        stmt.bind(index, policy.clockBackstepNanos); index += 1
+        stmt.bind(index, Int64(ceiling + 1))
+
+        while try stmt.step() {
+            let id = stmt.int(0)
+            let host = stmt.string(1)
+            let recv = stmt.int(2)
+            let sent = stmt.intOrNil(3)
+            let severity = Severity(clamping: Int(stmt.int(4)))
+            let message = stmt.string(5)
+            let flags = EventFlags(rawValue: Int32(truncatingIfNeeded: stmt.int(6)))
+            let previousRecv = stmt.intOrNil(7)
+            let previousSent = stmt.intOrNil(8)
+            let previousFlags = stmt.intOrNil(9).map { EventFlags(rawValue: Int32(truncatingIfNeeded: $0)) }
+
+            if report.markers.count >= ceiling {
+                report.truncated = true
+                break
+            }
+
+            // A row can satisfy more than one condition — the first frame of a
+            // boot is often also the frame that has no clock. Classified in the
+            // order that says the most about what happened.
+            let marker: LifecycleMarker
+            var gap: Int64?
+            if previousRecv == nil {
+                marker = .boot
+            } else if let previousRecv, recv - previousRecv > policy.gapNanos {
+                marker = .boot
+                gap = recv - previousRecv
+            } else if let previousSent, let sent, previousSent - sent > policy.clockBackstepNanos {
+                marker = .clockReset
+            } else if previousFlags?.contains(.clockUnset) == true, !flags.contains(.clockUnset) {
+                marker = .clockSync
+            } else {
+                marker = .fault
+            }
+
+            report.markers.append(LifecycleEvent(
+                id: id, marker: marker, host: host, recvNanos: recv, sentNanos: sent,
+                severity: severity, message: message, gapNanos: gap))
+        }
+
+        report.runs = try runs(from: fromNanos, to: toNanos, hosts: hosts,
+                               policy: policy, markers: report.markers)
+        return report
+    }
+
+    /// Turn the boundaries into runs, and say how each one ended.
+    private func runs(
+        from fromNanos: Int64,
+        to toNanos: Int64,
+        hosts: Set<String>,
+        policy: LifecyclePolicy,
+        markers: [LifecycleEvent]
+    ) throws -> [NodeRun] {
+        let now = Timestamp.now()
+        var byHost: [String: [LifecycleEvent]] = [:]
+        for marker in markers { byHost[marker.host, default: []].append(marker) }
+
+        var hostRows: [(host: String, first: Int64, last: Int64, count: Int64, worst: Severity)] = []
+        var hostClause = ""
+        if !hosts.isEmpty { hostClause = "AND host IN (\(QueryPredicate.placeholders(hosts.count)))" }
+        let stmt = try connection.prepare("""
+            SELECT host, MIN(recv_ns), MAX(recv_ns), COUNT(*), MIN(severity)
+            FROM events WHERE recv_ns >= ? AND recv_ns <= ? \(hostClause)
+            GROUP BY host
+            """)
+        defer { stmt.finalize() }
+        var index: Int32 = 1
+        stmt.bind(index, fromNanos); index += 1
+        stmt.bind(index, toNanos); index += 1
+        for host in hosts.sorted() { stmt.bind(index, host); index += 1 }
+        while try stmt.step() {
+            hostRows.append((stmt.string(0), stmt.int(1), stmt.int(2), stmt.int(3),
+                             Severity(clamping: Int(stmt.int(4)))))
+        }
+
+        var runs: [NodeRun] = []
+        for row in hostRows {
+            let boundaries = (byHost[row.host] ?? [])
+                .filter { $0.marker == .boot || $0.marker == .clockReset }
+                .map(\.recvNanos)
+            let starts = ([row.first] + boundaries).sorted().reduce(into: [Int64]()) { unique, value in
+                if unique.last != value { unique.append(value) }
+            }
+
+            for (position, start) in starts.enumerated() {
+                let end = position + 1 < starts.count ? starts[position + 1] : row.last
+                let markersInRun = (byHost[row.host] ?? [])
+                    .filter { $0.recvNanos >= start && $0.recvNanos <= end }
+                let faults = markersInRun.filter { $0.marker == .fault }.count
+                let isLast = position + 1 == starts.count
+                let silence = now - end
+
+                // A run's ending is only knowable for the last one; every
+                // earlier run ended because a new one started, which says
+                // nothing about how.
+                let ending: RunEnding
+                if !isLast {
+                    // It stopped and came back. Whether that was a crash or a
+                    // clean restart is not visible from here — unless it was
+                    // saying something was wrong when it stopped.
+                    ending = markersInRun.last?.marker == .fault ? .faulted : .cutOff
+                } else if silence < policy.gapNanos {
+                    ending = .running
+                } else if markersInRun.last?.marker == .fault {
+                    ending = .faulted
+                } else {
+                    let span = max(Double(end - start) / 1e9, 1)
+                    let rate = Double(row.count) / span
+                    ending = rate >= policy.busyRatePerSecond ? .cutOff : .quiet
+                }
+
+                runs.append(NodeRun(
+                    host: row.host,
+                    startNanos: start,
+                    lastNanos: end,
+                    events: isLast ? row.count : 0,
+                    worst: markersInRun.map(\.severity).min() ?? row.worst,
+                    ending: ending,
+                    startedWithoutAClock: markersInRun.contains { $0.marker == .clockSync }
+                        || markersInRun.first?.sentNanos == nil,
+                    clockSyncNanos: markersInRun.first { $0.marker == .clockSync }?.recvNanos,
+                    faults: Int64(faults)
+                ))
+            }
+        }
+        return runs.sorted { ($0.host, $0.startNanos) < ($1.host, $1.startNanos) }
     }
 
     // MARK: - The fleet

@@ -57,8 +57,14 @@ public struct FilterState: Equatable, Sendable {
     }
 
     /// The query this asks of the store, at this moment.
-    public func query(ordering: TimeOrdering, limit: Int, now: Int64 = Timestamp.now()) -> EventQuery {
+    public func query(
+        ordering: TimeOrdering,
+        limit: Int,
+        sinceId: Int64? = nil,
+        now: Int64 = Timestamp.now()
+    ) -> EventQuery {
         var q = EventQuery()
+        q.sinceId = sinceId
         q.hosts = hosts
         q.tags = tags
         q.severities = severities

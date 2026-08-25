@@ -70,6 +70,13 @@ public struct EventQuery: Equatable, Sendable {
     /// The page size. A log viewer that tries to hold the corpus in a table is a
     /// log viewer that beachballs.
     public var limit: Int = 3000
+    /// Only events newer than this id, oldest first.
+    ///
+    /// This is how something without a screen tails the log: ask what is new
+    /// since the last id it saw, and remember the id it gets back. No held-open
+    /// connection to time out, no window to miss, and asking twice returns the
+    /// same answer — which a stream cannot promise.
+    public var sinceId: Int64?
 
     public init() {}
 
@@ -140,6 +147,10 @@ struct QueryPredicate {
         if !query.severities.isEmpty {
             clauses.append("e.severity IN (\(Self.placeholders(query.severities.count)))")
             bindings.append(contentsOf: query.severities.sorted().map { SQLValue.int(Int64($0.rawValue)) })
+        }
+        if let sinceId = query.sinceId {
+            clauses.append("e.id > ?")
+            bindings.append(.int(sinceId))
         }
         if !query.requiredFlags.isEmpty {
             clauses.append("(e.flags & ?) = ?")

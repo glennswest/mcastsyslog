@@ -99,6 +99,16 @@ public final class StreamModel: ObservableObject {
         }
 
         self.apiContext = apiContext
+        apiContext.onStoreCleared = { [weak self] in
+            // Cleared from the API: the window must not go on showing rows that
+            // no longer exist behind it.
+            Task { @MainActor in
+                self?.events = []
+                self?.unseen = 0
+                self?.refreshSummaries()
+                self?.refresh()
+            }
+        }
         apiServer.route = APIRouter(context: apiContext).route
         apiServer.onStateChange = { [weak self] error in
             Task { @MainActor in
@@ -180,6 +190,8 @@ public final class StreamModel: ObservableObject {
         var snapshot = APIContext.Snapshot()
         snapshot.endpoint = settings.endpoint
         snapshot.retention = settings.retention
+        snapshot.allowClearing = settings.apiAllowClearing
+        snapshot.servesRemotely = settings.apiAllowRemote
         apiContext?.update(snapshot)
     }
 

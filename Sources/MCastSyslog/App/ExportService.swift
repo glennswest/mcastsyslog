@@ -129,11 +129,30 @@ public enum ExportFormatter {
 public enum ExportService {
 
     public enum Format: String, CaseIterable {
+        /// One JSON object per line, manifest first. The interchange format —
+        /// appendable, greppable, streamable, and survives a truncated write.
         case jsonl
+        /// A single JSON document: `{"mcastsyslog": {…}, "events": [ … ]}`.
+        /// What a tool that wants to `JSON.parse` the whole thing expects.
+        case json
+        /// Not a data format. For pasting into an issue.
         case text
 
-        public var fileExtension: String { self == .jsonl ? "jsonl" : "log" }
-        public var label: String { self == .jsonl ? "Event bundle (JSONL)" : "Plain text" }
+        public var fileExtension: String {
+            switch self {
+            case .jsonl: return "jsonl"
+            case .json: return "json"
+            case .text: return "log"
+            }
+        }
+
+        public var label: String {
+            switch self {
+            case .jsonl: return "Event bundle (JSONL)"
+            case .json: return "JSON document"
+            case .text: return "Plain text"
+            }
+        }
     }
 
     /// Stream every matching event to `url`. Streaming rather than collecting:
@@ -165,11 +184,22 @@ public enum ExportService {
             }
         }
 
-        if format == .jsonl {
-            let manifest = ExportFormatter.manifest(filter: filter, endpoint: endpoint, ordering: ordering)
+        let manifest = ExportFormatter.manifest(filter: filter, endpoint: endpoint, ordering: ordering)
+
+        switch format {
+        case .jsonl:
             let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
             try emit(String(decoding: data, as: UTF8.self))
-        } else {
+        case .json:
+            // Written by hand rather than assembled and serialised in one go:
+            // a day of a fleet's traffic should not have to fit in memory to be
+            // exported, and JSONSerialization has no streaming mode.
+            let header = try JSONSerialization.data(
+                withJSONObject: manifest["mcastsyslog"] as Any, options: [.sortedKeys, .prettyPrinted])
+            try emit("{")
+            try emit("  \"mcastsyslog\": \(indent(String(decoding: header, as: UTF8.self), by: 2)),")
+            try emit("  \"events\": [")
+        case .text:
             try emit("# mcastsyslog \(AppVersion.current) — \(endpoint.description)")
             try emit("# exported \(Timestamp.format(Timestamp.now(), style: .rfc3339UTC)), \(filter.range.label)")
         }
@@ -180,23 +210,61 @@ public enum ExportService {
                 let data = try JSONSerialization.data(
                     withJSONObject: ExportFormatter.json(event), options: [.sortedKeys])
                 try emit(String(decoding: data, as: UTF8.self))
+            case .json:
+                let data = try JSONSerialization.data(
+                    withJSONObject: ExportFormatter.json(event), options: [.sortedKeys])
+                // The comma belongs before every element but the first, which is
+                // the only way to close the array correctly without knowing the
+                // count in advance.
+                try emit("    \(written > 0 ? "," : "")\(String(decoding: data, as: UTF8.self))")
             case .text:
                 try emit(ExportFormatter.textLine(event, ordering: ordering))
             }
             written += 1
         }
 
+        if format == .json {
+            try emit("  ],")
+            try emit("  \"count\": \(written)")
+            try emit("}")
+        }
+
         if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
         return written
     }
 
+    private static func indent(_ text: String, by spaces: Int) -> String {
+        let pad = String(repeating: " ", count: spaces)
+        return text.split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .map { $0.offset == 0 ? String($0.element) : pad + $0.element }
+            .joined(separator: "\n")
+    }
+
     /// Read a bundle written by this app — or by anything else that produces the
     /// documented encoding, which is the point of documenting it.
+    ///
+    /// Both shapes are accepted without being told which: a whole-document parse
+    /// is tried first, and anything that is not one is read line by line. A
+    /// person who has an export and wants it back should not have to know which
+    /// menu item produced it.
     public static func read(_ url: URL) throws -> (events: [LogEvent], manifest: [String: Any]?) {
         let text = try String(contentsOf: url, encoding: .utf8)
         var events: [LogEvent] = []
         var manifest: [String: Any]?
         let now = Timestamp.now()
+
+        if let data = text.data(using: .utf8),
+           let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let array = document["events"] as? [[String: Any]] {
+            manifest = document["mcastsyslog"] as? [String: Any]
+            for object in array {
+                if let event = ExportFormatter.event(from: object, fallbackReceive: now) {
+                    events.append(event)
+                }
+            }
+            return (events, manifest)
+        }
 
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let data = line.data(using: .utf8),

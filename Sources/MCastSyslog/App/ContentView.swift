@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showJump = false
     @State private var exportError: String?
+    @State private var confirmClear = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -34,8 +35,16 @@ struct ContentView: View {
         } message: {
             Text(exportError ?? "")
         }
+        .confirmationDialog("Delete every stored event?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Delete everything", role: .destructive) { model.clearStore() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This cannot be undone. The nodes keep their own files and this viewer will fill up again from the group, but anything already recorded here — \(model.storeStats.events.formatted()) events across \(model.storeStats.hosts) node\(model.storeStats.hosts == 1 ? "" : "s") — is gone.")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .mcastJumpToMoment)) { _ in showJump = true }
         .onReceive(NotificationCenter.default.publisher(for: .mcastExportJSONL)) { _ in export(.jsonl) }
+        .onReceive(NotificationCenter.default.publisher(for: .mcastExportJSON)) { _ in export(.json) }
+        .onReceive(NotificationCenter.default.publisher(for: .mcastClearLog)) { _ in confirmClear = true }
         .onReceive(NotificationCenter.default.publisher(for: .mcastExportText)) { _ in export(.text) }
         .onReceive(NotificationCenter.default.publisher(for: .mcastImportBundle)) { _ in importBundle() }
     }
@@ -74,6 +83,7 @@ struct ContentView: View {
         ToolbarItem {
             Menu {
                 Button("Export as event bundle (JSONL)…") { export(.jsonl) }
+                Button("Export as JSON document…") { export(.json) }
                 Button("Export as plain text…") { export(.text) }
                 Divider()
                 Button("Open an event bundle…") { importBundle() }
@@ -101,7 +111,7 @@ struct ContentView: View {
         let panel = NSSavePanel()
         panel.title = "Export events"
         panel.nameFieldStringValue = defaultExportName(format)
-        panel.allowedContentTypes = [format == .jsonl ? .json : .plainText]
+        panel.allowedContentTypes = [format == .text ? .plainText : .json]
         panel.allowsOtherFileTypes = true
         panel.message = "Everything matching the current filters, not just the rows on screen."
 
@@ -166,6 +176,8 @@ struct ContentView: View {
 extension Notification.Name {
     static let mcastJumpToMoment = Notification.Name("mcast.jumpToMoment")
     static let mcastExportJSONL = Notification.Name("mcast.exportJSONL")
+    static let mcastExportJSON = Notification.Name("mcast.exportJSON")
+    static let mcastClearLog = Notification.Name("mcast.clearLog")
     static let mcastExportText = Notification.Name("mcast.exportText")
     static let mcastImportBundle = Notification.Name("mcast.importBundle")
 }

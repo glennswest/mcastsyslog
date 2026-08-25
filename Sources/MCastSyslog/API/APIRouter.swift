@@ -49,6 +49,10 @@ public struct APIRouter {
             return .response(stats())
         case "\(Self.prefix)/stream":
             return stream(request)
+        case "\(Self.prefix)/clear":
+            return .response(clear(request))
+        case "\(Self.prefix)/lifecycle":
+            return .response(lifecycle(request))
         default:
             if path.hasPrefix("\(Self.prefix)/events/"),
                let id = Int64(path.dropFirst("\(Self.prefix)/events/".count)) {
@@ -84,6 +88,13 @@ public struct APIRouter {
                  "parameters": eventParameterDocs()],
                 ["path": "\(Self.prefix)/stats", "description": "store, receiver and retention numbers"],
                 ["path": "\(Self.prefix)/stream", "description": "Server-Sent Events: the live tail, filtered the same way as /events"],
+                ["path": "\(Self.prefix)/lifecycle", "description": "boots, clock syncs, faults and silences, derived from the stream",
+                 "parameters": ["host": "narrow to one or more nodes",
+                                "last": "the span to look over, e.g. 6h (default 24h)",
+                                "from": "explicit lower bound", "to": "explicit upper bound",
+                                "gap": "silence that ends a run, e.g. 90s (default 90s)"]],
+                ["path": "\(Self.prefix)/clear", "description": "delete every stored event. Off unless enabled, loopback only, needs confirm=yes",
+                 "parameters": ["confirm": "must be `yes`"]],
             ],
             "console": "/",
         ]
@@ -102,7 +113,8 @@ public struct APIRouter {
             "to": "upper time bound, inclusive",
             "last": "a span ending now instead of from/to, e.g. 15m, 2h, 1d",
             "order": "sender (default) or receive — which of the two times to sort and bound by",
-            "limit": "how many to return, newest first (default 200, maximum 10000)",
+            "limit": "how many to return (default 200, maximum 10000)",
+            "since_id": "only events after this id, oldest first — how to tail without a held-open connection. Use the `next_since_id` from the previous response.",
         ]
     }
 
@@ -125,6 +137,15 @@ public struct APIRouter {
                  "description": "the node collapsed a run of identical lines; `repeated` carries how many"],
                 ["name": "rate_limited", "bit": Int(EventFlags.rateLimitNotice.rawValue),
                  "description": "the node's token bucket ran dry; `repeated` carries how many lines it held back"],
+            ],
+            "lifecycle_markers": LifecycleMarker.allCases.map {
+                ["value": $0.rawValue, "name": $0.label]
+            },
+            "run_endings": [
+                ["value": "running", "description": "still talking"],
+                ["value": "faulted", "description": "stopped, and the last thing it said was a fault — as close to `it crashed` as anything outside the node can honestly get"],
+                ["value": "cut_off", "description": "stopped mid-stream and said nothing about why"],
+                ["value": "quiet", "description": "stopped, having barely been talking"],
             ],
             "search_modes": SearchMode.allCases.map {
                 ["value": $0.rawValue, "name": $0.label, "description": $0.explanation]
@@ -167,6 +188,8 @@ public struct APIRouter {
             "malformed": receiver.malformed,
             "last_received": receiver.lastReceiveNanos.map { Timestamp.format($0, style: .rfc3339UTC) } as Any,
             "error": receiver.lastError as Any,
+            "clearing_allowed": settings.allowClearing && !settings.servesRemotely,
+            "newest_id": (try? context.withReader { try $0.newestId() }) ?? 0,
         ]
     }
 
@@ -218,19 +241,73 @@ public struct APIRouter {
 
         do {
             return try context.withReader { reader in
-                let outcome = try reader.fetch(parsed.query)
-                let counted = try reader.countMatching(parsed.query)
-                return .json([
+                // With a cursor the question is "what is new", which is a
+                // forward walk in arrival order; without one it is "what is the
+                // latest", which is the tail of the stream.
+                let outcome = parsed.isTail
+                    ? try reader.fetchForward(parsed.query)
+                    : try reader.fetch(parsed.query)
+
+                // Where to resume. The highest id seen, or — when nothing
+                // matched — the cursor that was handed in, so a caller that
+                // polls a quiet fleet does not walk backwards.
+                let nextSinceId = outcome.events.map(\.id).max()
+                    ?? parsed.query.sinceId
+                    ?? (try? reader.newestId())
+                    ?? 0
+
+                var body: [String: Any] = [
                     "events": outcome.events.map { ExportFormatter.json($0) },
                     "returned": outcome.events.count,
-                    "matched": counted.count,
-                    "matched_exact": counted.exact,
                     "truncated": outcome.truncated,
                     "scanned": outcome.scanned,
                     "elapsed_ms": Double(outcome.elapsedNanos) / 1e6,
+                    "next_since_id": nextSinceId,
                     "query": parsed.describe(),
-                ])
+                ]
+                if !parsed.isTail {
+                    let counted = try reader.countMatching(parsed.query)
+                    body["matched"] = counted.count
+                    body["matched_exact"] = counted.exact
+                }
+                return .json(body)
             }
+        } catch {
+            return .error(500, "Internal Server Error", "\(error)")
+        }
+    }
+
+    /// Delete everything the viewer has stored.
+    ///
+    /// Guarded three ways, because this is the one endpoint that destroys
+    /// something: it must be switched on deliberately, it refuses when the API
+    /// is reachable from other machines, and it needs `confirm=yes` so it
+    /// cannot be reached by a stray link or a mistyped path. The nodes keep
+    /// their own files either way; what is lost is this viewer's record.
+    private func clear(_ request: HTTPRequest) -> HTTPResponse {
+        let settings = context.settings
+        guard settings.allowClearing else {
+            return .error(403, "Forbidden",
+                "clearing over the API is off. Turn on \"Allow clearing the log over the API\" in Settings → REST API, or use Stream → Clear Stored Events in the app.")
+        }
+        guard !settings.servesRemotely else {
+            return .error(403, "Forbidden",
+                "the API is serving on every interface, so clearing over it is refused. It is available only when the API is bound to 127.0.0.1.")
+        }
+        guard request.first("confirm") == "yes" else {
+            return .error(400, "Bad Request",
+                "add `confirm=yes`. This deletes every event this viewer has stored — the nodes keep their own files, but this record is gone.")
+        }
+
+        do {
+            let before = try context.storeStats()
+            try context.clearStore()
+            return .json([
+                "cleared": true,
+                "events_deleted": before.events,
+                "bytes_freed": before.bytes,
+                "note": "The nodes were not touched. The viewer will fill up again from the group.",
+            ])
         } catch {
             return .error(500, "Internal Server Error", "\(error)")
         }
@@ -391,6 +468,83 @@ public struct APIRouter {
             "note": "Events appear as they arrive. This is a tail of the wire, not a replay — use /events for history.",
         ])
         return .eventStream(handle)
+    }
+
+    /// Where each node's runs begin and end, and what it said at the seams.
+    private func lifecycle(_ request: HTTPRequest) -> HTTPResponse {
+        let now = Timestamp.now()
+        var from = now - 24 * 3600 * 1_000_000_000
+        var to = now
+        do {
+            if let last = request.first("last") {
+                guard let span = ParsedQuery.duration(last) else {
+                    return .error(400, "Bad Request", "`\(last)` is not a span — try 6h, 2d, or a number of seconds")
+                }
+                from = now - span
+            } else {
+                if let explicit = try ParsedQuery.time(request.first("from"), name: "from") { from = explicit }
+                if let explicit = try ParsedQuery.time(request.first("to"), name: "to") { to = explicit }
+            }
+        } catch {
+            return badRequest(error)
+        }
+
+        var policy = LifecyclePolicy.default
+        if let gap = request.first("gap") {
+            guard let span = ParsedQuery.duration(gap) else {
+                return .error(400, "Bad Request", "`gap` is not a span — try 90s, 5m")
+            }
+            policy.gapNanos = span
+        }
+        let hosts = Set(request.list("host"))
+
+        do {
+            return try context.withReader { reader in
+                let report = try reader.lifecycle(from: from, to: to, hosts: hosts, policy: policy)
+                return .json([
+                    "from": Timestamp.format(report.fromNanos, style: .rfc3339UTC),
+                    "to": Timestamp.format(report.toNanos, style: .rfc3339UTC),
+                    "gap_seconds": Double(policy.gapNanos) / 1e9,
+                    "truncated": report.truncated,
+                    "markers": report.markers.map { marker in
+                        var object: [String: Any] = [
+                            "id": marker.id,
+                            "marker": marker.marker.rawValue,
+                            "label": marker.marker.label,
+                            "host": marker.host,
+                            "at": Timestamp.format(marker.timeNanos, style: .rfc3339UTC),
+                            "recv": Timestamp.format(marker.recvNanos, style: .rfc3339UTC),
+                            "severity": Int(marker.severity.rawValue),
+                            "severity_name": marker.severity.label,
+                            "message": marker.message,
+                        ]
+                        if marker.sentNanos == nil { object["clock_unset"] = true }
+                        if let gap = marker.gapNanos {
+                            object["silent_for_seconds"] = Double(gap) / 1e9
+                        }
+                        return object
+                    },
+                    "runs": report.runs.map { run in
+                        [
+                            "host": run.host,
+                            "started": Timestamp.format(run.startNanos, style: .rfc3339UTC),
+                            "last_seen": Timestamp.format(run.lastNanos, style: .rfc3339UTC),
+                            "duration_seconds": Double(run.durationNanos) / 1e9,
+                            "ending": run.ending.rawValue,
+                            "ending_label": run.ending.label,
+                            "faults": run.faults,
+                            "started_without_a_clock": run.startedWithoutAClock,
+                            "clock_came_up": run.clockSyncNanos.map {
+                                Timestamp.format($0, style: .rfc3339UTC) } as Any,
+                            "worst_severity_name": run.worst.label,
+                        ]
+                    },
+                    "note": "Derived from the stream, never asked of a node. `cut_off` means the node stopped mid-stream and said nothing about why — a crash, a power cut and a severed cable look identical from outside, and this does not pretend to tell them apart.",
+                ])
+            }
+        } catch {
+            return .error(500, "Internal Server Error", "\(error)")
+        }
     }
 
     private func badRequest(_ error: Error) -> HTTPResponse {

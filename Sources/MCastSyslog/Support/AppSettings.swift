@@ -43,6 +43,11 @@ public final class AppSettings: ObservableObject {
     @Published public var apiAllowRemote: Bool {
         didSet { defaults.set(apiAllowRemote, forKey: Key.apiAllowRemote) }
     }
+    /// Whether `DELETE`-by-any-other-name is reachable over HTTP at all. Off
+    /// unless asked for; refused outright when the API serves remotely.
+    @Published public var apiAllowClearing: Bool {
+        didSet { defaults.set(apiAllowClearing, forKey: Key.apiAllowClearing) }
+    }
 
     private enum Key {
         static let groupAddress = "group.address"
@@ -55,6 +60,7 @@ public final class AppSettings: ObservableObject {
         static let apiEnabled = "api.enabled"
         static let apiPort = "api.port"
         static let apiAllowRemote = "api.allowRemote"
+        static let apiAllowClearing = "api.allowClearing"
     }
 
     private let defaults: UserDefaults
@@ -69,9 +75,12 @@ public final class AppSettings: ObservableObject {
             Key.ordering: TimeOrdering.senderTime.rawValue,
             Key.liveWindow: 5000,
             Key.autoStart: true,
-            Key.apiEnabled: false,
+            // On by default, and loopback-only: a local API that has to be
+            // switched on before it can answer is a local API nobody uses.
+            Key.apiEnabled: true,
             Key.apiPort: 8514,
             Key.apiAllowRemote: false,
+            Key.apiAllowClearing: false,
         ])
         groupAddress = defaults.string(forKey: Key.groupAddress) ?? ListenEndpoint.default.address
         port = defaults.integer(forKey: Key.port)
@@ -83,6 +92,7 @@ public final class AppSettings: ObservableObject {
         apiEnabled = defaults.bool(forKey: Key.apiEnabled)
         apiPort = defaults.integer(forKey: Key.apiPort)
         apiAllowRemote = defaults.bool(forKey: Key.apiAllowRemote)
+        apiAllowClearing = defaults.bool(forKey: Key.apiAllowClearing)
     }
 
     public var endpoint: ListenEndpoint {

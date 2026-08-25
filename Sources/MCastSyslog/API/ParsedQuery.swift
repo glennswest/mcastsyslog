@@ -82,9 +82,18 @@ struct ParsedQuery {
         // a way to make the viewer allocate the corpus on someone else's say-so.
         limit = min(limit, Self.maximumLimit)
 
+        // A cursor makes the request a tail rather than a page: everything
+        // after this id, oldest first.
+        let sinceId = request.first("since_id").flatMap(Int64.init)
+        if request.first("since_id") != nil, sinceId == nil {
+            throw Failure(message: "`since_id` must be an event id — the `next_since_id` from a previous response")
+        }
+
         self.filter = filter
-        self.query = filter.query(ordering: ordering, limit: limit)
+        self.query = filter.query(ordering: ordering, limit: limit, sinceId: sinceId)
     }
+
+    var isTail: Bool { query.sinceId != nil }
 
     /// Echoed back on every response, so a caller can see how its parameters
     /// were actually read rather than assuming.
@@ -112,6 +121,7 @@ struct ParsedQuery {
         if let to = query.toNanos, to < Int64.max / 4 {
             described["to"] = Timestamp.format(to, style: .rfc3339UTC)
         }
+        if let sinceId = query.sinceId { described["since_id"] = sinceId }
         return described
     }
 

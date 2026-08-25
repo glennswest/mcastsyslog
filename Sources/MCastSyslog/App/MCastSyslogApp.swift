@@ -45,10 +45,15 @@ struct MCastSyslogApp: App {
             }
             .keyboardShortcut("e")
 
+            Button("Export as JSON Document…") {
+                NotificationCenter.default.post(name: .mcastExportJSON, object: nil)
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+
             Button("Export as Plain Text…") {
                 NotificationCenter.default.post(name: .mcastExportText, object: nil)
             }
-            .keyboardShortcut("e", modifiers: [.command, .shift])
+            .keyboardShortcut("e", modifiers: [.command, .option])
         }
 
         CommandMenu("Stream") {
@@ -81,6 +86,14 @@ struct MCastSyslogApp: App {
 
             Button("All Nodes") { model.focus(host: nil) }
                 .keyboardShortcut("0", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Clear Stored Events…") {
+                NotificationCenter.default.post(name: .mcastClearLog, object: nil)
+            }
+            .keyboardShortcut(.delete, modifiers: [.command, .shift])
+            .disabled(model.storeStats.events == 0)
         }
     }
 }
