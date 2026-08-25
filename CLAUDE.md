@@ -6,11 +6,13 @@ work plan, version info and project-specific context.
 
 ## Version
 
-**0.1.0** — released 2026-08-24. Pre-1.0, so the API is not yet stable.
+**0.2.0** — released 2026-08-25. Pre-1.0, so the API is not yet stable.
 
 Version locations that must match:
 - `Sources/MCastSyslog/Support/Version.swift` — `AppVersion.current`
-- `project.yml` — `CFBundleShortVersionString` / `CFBundleVersion`
+- `project.yml` — `MARKETING_VERSION`
+- `plugin/mcastsyslog/.claude-plugin/plugin.json` — `version`
+- `plugin/mcastsyslog/mcp/server.py` — `serverInfo.version`
 - `CHANGELOG.md` — latest released heading
 - git tag `vX.Y.Z`
 
@@ -24,7 +26,7 @@ not checked in as a merge hazard.
 |---|---|---|
 | `MCastSyslog` | macOS app | The viewer. SwiftUI + AppKit. |
 | `stormsim` | CLI tool | Emits synthetic RFC 5424 traffic to the group, for testing without a fleet. |
-| `MCastSyslogTests` | unit tests | Parser, timestamps, store, filter/SQL agreement, export encoding and the REST API. |
+| `MCastSyslogTests` | unit tests | Parser, timestamps, plain text, store, filter/SQL agreement, lifecycle, analysis, export encoding and the REST API. 140 of them. |
 
 Source layout under `Sources/MCastSyslog/`:
 
@@ -36,7 +38,9 @@ Source layout under `Sources/MCastSyslog/`:
   when the interface set changes.
 - `Store/` — SQLite (the system `libsqlite3`, no third-party dependency).
   Schema, batched writer, index-driven queries, FTS5 token search, retention.
-- `API/` — the read-only REST API: a small HTTP/1.1 server on `NWListener`,
+- `plugin/` — the Claude plugin: an MCP server over the local API, plus
+  commands. Standard-library Python, no dependencies.
+- `API/` — the REST API: a small HTTP/1.1 server on `NWListener`,
   the routes, query-parameter parsing, SSE fan-out and the browser console.
 - `App/` — SwiftUI views, view models, export.
 - `Support/` — version, formatting, small shared helpers.
@@ -69,7 +73,12 @@ already on the machine. `docs/SPEC.md` has been amended accordingly.
 - [x] Tests — parser, store, query, retention
 - [x] Build, run, verify against `stormsim`
 - [x] REST API — retrieve, search, types, summary, stats, live SSE, console
+- [x] JSON document export, cursor tailing, log clearing
+- [x] Lifecycle markers — boots, clock syncs, faults, silences
+- [x] Analysis — a deep dive of a whole sequence
+- [x] Claude plugin — MCP server and commands
 - [x] v0.1.0 release
+- [x] v0.2.0 release
 
 ## Non-negotiables from the spec
 
@@ -85,7 +94,12 @@ These are properties, not preferences. A change that breaks one is a bug.
    and is cancellable; it does not quietly truncate.
 5. **Record both times.** Sender and receive time are separate fields, and
    their disagreement is shown, not smoothed over.
-6. **The REST API is read-only and loopback by default.** Only `GET` and `HEAD`
+6. **Nothing is asserted above the evidence.** The analysis and the lifecycle
+   markers distinguish what a node *stated* from what was *observed* from what
+   is merely *suggested*, and a run that stopped without explanation is
+   reported as `cut_off` rather than as a crash — a crash, a power cut and a
+   severed cable look identical from outside.
+7. **The REST API is read-only and loopback by default.** Only `GET` and `HEAD`
    are routed, nothing it can reach has a path back to a node, and it sends no
    CORS header — with one, any page the user was visiting could read the whole
    fleet's logs out of their browser.

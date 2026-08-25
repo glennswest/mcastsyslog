@@ -8,7 +8,18 @@ at a node and a bundle exported from the viewer are the same kind of thing.
 
 **Format identifier:** `mcastsyslog-events-v1`
 
-## The file
+## The two shapes
+
+The same events, written either way. A reader is not told which it has: a
+whole-document parse is tried first, and anything that is not one is read line
+by line. Someone with an export should not have to know which menu item made it.
+
+- **`.jsonl`** — the interchange format. One object per line, manifest first.
+- **`.json`** — a single document, `{"mcastsyslog": {…}, "events": [ … ], "count": N}`,
+  for a tool that wants to parse the whole thing at once. Written streaming, not
+  assembled — a day of a fleet's traffic should not have to fit in memory.
+
+## The JSONL file
 
 Newline-delimited JSON — one object per line. The first line is a manifest;
 every line after it is an event.
@@ -42,7 +53,8 @@ frame it cannot read.
 | `severity` | integer | 0 emergency … 7 debug |
 | `severity_name` | string | the same, spelled out |
 | `facility` | integer | 16 (`local0`) for a stormcos node |
-| `message` | string | |
+| `message` | string | exactly what the node sent, escapes and all |
+| `message_plain` | string | the same line with terminal escapes removed. Present **only** when it differs from `message`. |
 | `flags` | array | absent when empty |
 | `repeated` | integer | on a collapsed-repeat or rate-limit notice: how many |
 | `raw_base64` | string | the frame verbatim. Present **only** when `malformed`. |
@@ -89,6 +101,17 @@ the viewer should omit it.
 `filter` records what the export was a view of, so a bundle attached to an issue
 carries the question it was the answer to. It is descriptive: a reader does not
 have to understand it, and should not re-apply it.
+
+## Terminal escapes
+
+Real nodes emit coloured output: `stormpump` forwards a workload's stdout to the
+wire as it was written, so a line coloured for a terminal arrives with the
+escapes in it.
+
+`message` keeps them. This viewer does not quietly improve what it heard, and a
+consumer that wants the bytes the node sent should get them. `message_plain` is
+the readable rendering, and it is what the plain-text export and the app's own
+display use.
 
 ## Plain text
 

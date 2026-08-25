@@ -78,6 +78,91 @@ final class ExportTests: XCTestCase {
         XCTAssertEqual(manifest?["group"] as? String, ListenEndpoint.default.description)
     }
 
+    func testTheJSONDocumentIsOneValidObjectAndReadsBack() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mcastsyslog-json-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try EventStore(path: directory.appendingPathComponent("events.sqlite3").path)
+        let base: Int64 = 1_787_000_000_000_000_000
+        let originals = (0..<25).map { i in
+            LogEvent(recvNanos: base + Int64(i) * 1_000_000, sentNanos: base + Int64(i) * 1_000_000,
+                     host: "storm-0\(i % 3)", tag: "stormblock",
+                     severity: i % 5 == 0 ? .error : .info,
+                     source: "10.0.0.1", message: "line \(i)")
+        }
+        try store.insert(originals)
+
+        let url = directory.appendingPathComponent("bundle.json")
+        var query = EventQuery()
+        query.limit = Int.max
+        let written = try ExportService.write(
+            to: url, format: .json, query: query, filter: FilterState(),
+            endpoint: .default, ordering: .senderTime, reader: try store.makeReader())
+        XCTAssertEqual(written, 25)
+
+        // It has to be one document, not a stream of them — that is the whole
+        // difference from the JSONL form.
+        let data = try Data(contentsOf: url)
+        let document = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(document["count"] as? Int, 25)
+        XCTAssertNotNil(document["mcastsyslog"])
+        let array = try XCTUnwrap(document["events"] as? [[String: Any]])
+        XCTAssertEqual(array.count, 25)
+
+        let (readBack, manifest) = try ExportService.read(url)
+        XCTAssertEqual(readBack.map(\.message), originals.map(\.message))
+        XCTAssertEqual(manifest?["format"] as? String, ExportFormatter.formatIdentifier)
+    }
+
+    func testAnEmptyJSONExportIsStillValidJSON() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mcastsyslog-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try EventStore(path: directory.appendingPathComponent("events.sqlite3").path)
+        let url = directory.appendingPathComponent("empty.json")
+        var query = EventQuery()
+        query.limit = Int.max
+        let written = try ExportService.write(
+            to: url, format: .json, query: query, filter: FilterState(),
+            endpoint: .default, ordering: .senderTime, reader: try store.makeReader())
+
+        XCTAssertEqual(written, 0)
+        // The comma goes before every element but the first, so an empty array
+        // is exactly where hand-written JSON goes wrong.
+        let document = try JSONSerialization.jsonObject(with: try Data(contentsOf: url))
+        XCTAssertNotNil(document as? [String: Any])
+    }
+
+    func testReadingAcceptsEitherShapeWithoutBeingTold() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mcastsyslog-both-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try EventStore(path: directory.appendingPathComponent("events.sqlite3").path)
+        try store.insert([
+            LogEvent(recvNanos: 1_787_000_000_000_000_000, sentNanos: nil, host: "h", tag: "t",
+                     severity: .info, source: "s", message: "the same event"),
+        ])
+        var query = EventQuery()
+        query.limit = Int.max
+
+        for format in [ExportService.Format.jsonl, .json] {
+            let url = directory.appendingPathComponent("bundle.\(format.fileExtension)")
+            _ = try ExportService.write(
+                to: url, format: format, query: query, filter: FilterState(),
+                endpoint: .default, ordering: .senderTime, reader: try store.makeReader())
+            let (events, manifest) = try ExportService.read(url)
+            XCTAssertEqual(events.map(\.message), ["the same event"], "\(format) did not read back")
+            XCTAssertNotNil(manifest, "\(format) lost its manifest")
+        }
+    }
+
     func testTheManifestLineIsNotMistakenForAnEvent() throws {
         let manifest = ExportFormatter.manifest(filter: FilterState(), endpoint: .default, ordering: .senderTime)
         let inner = try XCTUnwrap(manifest["mcastsyslog"] as? [String: Any])

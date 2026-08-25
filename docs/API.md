@@ -44,6 +44,9 @@ The same rules the viewer has, for the same reason:
 | `GET /api/v1/summary` | a rollup of whatever the filters match |
 | `GET /api/v1/stats` | store, receiver and retention numbers |
 | `GET /api/v1/stream` | Server-Sent Events — the live tail |
+| `GET /api/v1/lifecycle` | boots, clock syncs, faults and silences, per node |
+| `GET /api/v1/analysis` | a deep dive of a whole sequence |
+| `GET /api/v1/clear` | delete everything stored. Off by default; see below |
 | `GET /` | a small browser console |
 
 ## Filters
@@ -63,7 +66,8 @@ Every filtering endpoint (`/events`, `/search`, `/summary`, `/around`,
 | `from`, `to` | time bounds. RFC 3339, `YYYY-MM-DD HH:MM:SS`, a bare epoch number, or a relative span like `-15m`. |
 | `last` | a span ending now, instead of `from`/`to`: `15m`, `2h`, `1d` |
 | `order` | `sender` (default) or `receive` — which of the two times to sort and bound by |
-| `limit` | how many to return, newest first. Default 200, **capped at 10000**. |
+| `limit` | how many to return. Default 200, **capped at 10000**. |
+| `since_id` | only events after this id, oldest first. How to tail — see below. |
 
 Every response echoes a `query` object showing how the parameters were actually
 read, so you can see what the server understood rather than assume.
@@ -81,6 +85,115 @@ They are not interchangeable, and the API says which one ran:
 `"scanned": true` in the response means the second one ran. Bound it with
 `last` or `from`/`to` — the scan is bounded by the time range, not by the
 corpus.
+
+## Tailing
+
+An HTTP request returns once, so following the log works with a cursor rather
+than a held-open connection. Every `/events` response carries `next_since_id`;
+pass it back to ask what is new.
+
+```bash
+# Start from now rather than from the beginning of history
+CURSOR=$(curl -s localhost:8514/api/v1/health | jq .newest_id)
+
+while true; do
+  PAGE=$(curl -s "localhost:8514/api/v1/events?since_id=$CURSOR&min_severity=warning")
+  echo "$PAGE" | jq -r '.events[] | "\(.recv) \(.host) \(.message_plain // .message)"'
+  CURSOR=$(echo "$PAGE" | jq .next_since_id)
+  sleep 2
+done
+```
+
+With `since_id`, events come back **oldest first** — a tail reads forward.
+Without it, the newest page comes back and reads like the bottom of a log.
+
+Nothing to hang, nothing to reconnect, and asking twice with the same cursor
+gives the same answer — which `/stream` cannot promise. `/stream` remains the
+right thing for a browser.
+
+## The lifecycle
+
+```bash
+curl 'localhost:8514/api/v1/lifecycle?host=storm-01&last=24h'
+```
+
+Boots, clock syncs, clock resets, faults and silences, derived from the stream.
+Nothing is asked of a node.
+
+Every marker says whether it was **`stated`** — the node said so — or inferred:
+
+- `kernel_boot` (**stated**) — the kernel prints `Linux version …` exactly once
+  per boot. The most reliable boot marker there is.
+- `boot` — inferred from silence, or from being the first thing ever heard.
+- `clock_sync` — the frame where the nil timestamp stops. That is NTP coming up
+  in the initramfs, and it is a real dated point in the boot.
+- `clock_reset` — the sender's clock stepped backwards. Marked, because the
+  node's sense of time did change, but it does **not** start a run: a node
+  running ntpd steps its clock in the middle of a perfectly healthy run.
+- `fault` — severity 0–2. The node's own account of something going badly wrong.
+
+`runs` groups those into periods of the node talking, each with an `ending`:
+
+| Ending | Means |
+|---|---|
+| `running` | still talking |
+| `rebooted` | it stopped because it booted again |
+| `faulted` | it stopped, and the last thing it said was a fault. As close to "it crashed" as anything outside the node can honestly get. |
+| `cut_off` | it stopped mid-stream and said nothing about why. A crash, a power cut and a severed cable look identical from here, and this does not pretend to tell them apart. |
+| `quiet` | it stopped, having barely been talking |
+
+`gap` sets how much silence ends a run (default `90s`). Raise it for a fleet
+that logs sparsely, or every quiet stretch reads as a reboot.
+
+## The analysis
+
+```bash
+curl 'localhost:8514/api/v1/analysis?host=storm-01&last=1h'
+```
+
+The deep dive: what happened, in what order, and what was unusual.
+
+When one host is named and no explicit `from`/`at` is given, the window
+**snaps to that node's most recent boot** — the sequence is the run, not the
+span you happened to ask for. `aligned_to_run` says whether it did, and
+`align_to_run=false` turns it off.
+
+| Field | What it is |
+|---|---|
+| `narrative` | the whole thing in sentences. Read this first. |
+| `phases` | `pre_clock` → `startup` → `steady` → `degraded`, with durations and counts. Only when a single host is named: several nodes' sequences overlaid is not one startup. |
+| `workloads` | every tag's first appearance and how long after the start — the order things came up in |
+| `escalations` | the first event at each severity, worst first |
+| `gaps` | the longest silences, with what was said immediately before |
+| `findings` | what was unusual, each with a `confidence` |
+| `correlations` | for each fault, what every **other** node was saying within ±5s |
+| `rate_profile` | events per bucket — the shape of the sequence |
+| `clock_skew` | at the start and end. A large skew that shrinks fast is a backlog replay, which is correct behaviour. |
+
+`confidence` is one of `stated` (the node said so), `observed` (the stream shows
+it directly) or `suggested` (consistent with the stream, but other explanations
+fit). Nothing is asserted at a level the evidence does not support.
+
+## Clearing
+
+```bash
+curl 'localhost:8514/api/v1/clear?confirm=yes'
+```
+
+The one endpoint that destroys something, and it needs three separate yeses:
+
+1. **Allow clearing the log over the API** must be on in Settings → REST API.
+   It is off by default.
+2. The API must be bound to `127.0.0.1`. Clearing is refused outright while it
+   serves on every interface.
+3. `confirm=yes` on the request, so it cannot be hit by a stray link.
+
+The nodes are not touched. What is lost is this viewer's record of what it
+heard; the nodes' own files still have every line, and the viewer fills up
+again from the group.
+
+In the app it is Stream → Clear Stored Events (⇧⌘⌫), which asks first and says
+how much will go.
 
 ## Examples
 
@@ -138,6 +251,11 @@ An event is the encoding documented in [EXPORT.md](EXPORT.md), plus an `id`:
   "message": "ERROR ublk queue 3 reset after io timeout"
 }
 ```
+
+Real nodes emit coloured output — `stormpump` forwards a workload's stdout as it
+was written. `message` keeps the escapes, because that is what the node sent;
+when they are present, **`message_plain`** carries the same line as a person
+would read it. It is absent when the two are identical.
 
 `sent_ns` and `sent` are **absent**, not null, when the node had no clock — it
 sent the nil timestamp rather than inventing a plausible time, and the

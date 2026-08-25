@@ -299,6 +299,140 @@ final class APITests: XCTestCase {
         }
     }
 
+    // MARK: - Tailing with a cursor
+
+    func testACursorReturnsWhatIsNewOldestFirst() throws {
+        let all = try events("/api/v1/events")
+        let third = try XCTUnwrap(all[2]["id"] as? Int)
+
+        let result = try get("/api/v1/events?since_id=\(third)")
+        let rows = try XCTUnwrap(result.json["events"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 3, "the three after it")
+        XCTAssertEqual(rows.first?["id"] as? Int, third + 1, "oldest first, so a tail reads forward")
+        XCTAssertEqual(result.json["next_since_id"] as? Int, all.last?["id"] as? Int)
+    }
+
+    func testAskingTwiceWithTheSameCursorGivesTheSameAnswer() throws {
+        let all = try events("/api/v1/events")
+        let cursor = try XCTUnwrap(all[1]["id"] as? Int)
+        let first = try get("/api/v1/events?since_id=\(cursor)")
+        let second = try get("/api/v1/events?since_id=\(cursor)")
+        XCTAssertEqual(first.json["returned"] as? Int, second.json["returned"] as? Int,
+                       "a cursor is repeatable, which is the reason to prefer it to a stream")
+    }
+
+    func testAQuietFleetDoesNotWalkTheCursorBackwards() throws {
+        let all = try events("/api/v1/events")
+        let newest = try XCTUnwrap(all.last?["id"] as? Int)
+        let result = try get("/api/v1/events?since_id=\(newest)")
+        XCTAssertEqual(result.json["returned"] as? Int, 0)
+        XCTAssertEqual(result.json["next_since_id"] as? Int, newest,
+                       "nothing new must not mean starting over")
+    }
+
+    func testTheCursorRespectsTheOtherFilters() throws {
+        let result = try get("/api/v1/events?since_id=0&min_severity=warning")
+        let rows = try XCTUnwrap(result.json["events"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.allSatisfy { ($0["severity"] as? Int ?? 9) <= 4 })
+    }
+
+    func testAMalformedCursorIsRefusedRatherThanIgnored() throws {
+        let result = try get("/api/v1/events?since_id=banana")
+        XCTAssertEqual(result.status, 400, "silently ignoring it would restart a tail from the beginning")
+    }
+
+    func testHealthCarriesTheNewestIdSoATailCanStartFromNow() throws {
+        let health = try get("/api/v1/health")
+        let all = try events("/api/v1/events")
+        XCTAssertEqual(health.json["newest_id"] as? Int, all.last?["id"] as? Int)
+    }
+
+    // MARK: - Clearing
+
+    func testClearingIsRefusedUnlessItHasBeenSwitchedOn() throws {
+        let result = try get("/api/v1/clear?confirm=yes")
+        XCTAssertEqual(result.status, 403)
+        XCTAssertEqual(try get("/api/v1/events").json["returned"] as? Int, 6,
+                       "and nothing was deleted")
+    }
+
+    func testClearingNeedsConfirmationEvenWhenSwitchedOn() throws {
+        var snapshot = APIContext.Snapshot()
+        snapshot.allowClearing = true
+        context.update(snapshot)
+
+        XCTAssertEqual(try get("/api/v1/clear").status, 400)
+        XCTAssertEqual(try get("/api/v1/clear?confirm=maybe").status, 400)
+        XCTAssertEqual(try get("/api/v1/events").json["returned"] as? Int, 6)
+    }
+
+    func testClearingIsRefusedWhenTheAPIServesToOtherMachines() throws {
+        var snapshot = APIContext.Snapshot()
+        snapshot.allowClearing = true
+        snapshot.servesRemotely = true
+        context.update(snapshot)
+
+        let result = try get("/api/v1/clear?confirm=yes")
+        XCTAssertEqual(result.status, 403)
+        XCTAssertEqual(try get("/api/v1/events").json["returned"] as? Int, 6)
+    }
+
+    func testClearingWorksWhenAllThreeGuardsAgree() throws {
+        var snapshot = APIContext.Snapshot()
+        snapshot.allowClearing = true
+        context.update(snapshot)
+
+        let result = try get("/api/v1/clear?confirm=yes")
+        XCTAssertEqual(result.status, 200)
+        XCTAssertEqual(result.json["cleared"] as? Bool, true)
+        XCTAssertEqual(result.json["events_deleted"] as? Int, 6)
+        XCTAssertEqual(try get("/api/v1/events").json["returned"] as? Int, 0)
+    }
+
+    func testHealthSaysWhetherClearingIsAvailable() throws {
+        XCTAssertEqual(try get("/api/v1/health").json["clearing_allowed"] as? Bool, false)
+
+        var snapshot = APIContext.Snapshot()
+        snapshot.allowClearing = true
+        context.update(snapshot)
+        XCTAssertEqual(try get("/api/v1/health").json["clearing_allowed"] as? Bool, true)
+
+        snapshot.servesRemotely = true
+        context.update(snapshot)
+        XCTAssertEqual(try get("/api/v1/health").json["clearing_allowed"] as? Bool, false)
+    }
+
+    // MARK: - Analysis and lifecycle over HTTP
+
+    func testAnalysisIsServedWithItsNarrativeFirst() throws {
+        let result = try get("/api/v1/analysis?last=24h")
+        XCTAssertEqual(result.status, 200)
+        XCTAssertNotNil(result.json["narrative"] as? [String])
+        XCTAssertNotNil(result.json["workloads"])
+        XCTAssertNotNil(result.json["findings"])
+        XCTAssertNotNil(result.json["confidence_levels"])
+    }
+
+    func testLifecycleIsServedAndNamesItsMarkers() throws {
+        let result = try get("/api/v1/lifecycle?last=24h")
+        XCTAssertEqual(result.status, 200)
+        let markers = try XCTUnwrap(result.json["markers"] as? [[String: Any]])
+        for marker in markers {
+            XCTAssertNotNil(marker["stated"], "whether the node said so, or we worked it out")
+            XCTAssertNotNil(marker["label"])
+        }
+    }
+
+    func testTypesDescribesTheLifecycleVocabularyToo() throws {
+        let result = try get("/api/v1/types")
+        let markers = try XCTUnwrap(result.json["lifecycle_markers"] as? [[String: Any]])
+        XCTAssertTrue(markers.contains { $0["value"] as? String == "kernel_boot" })
+        let endings = try XCTUnwrap(result.json["run_endings"] as? [[String: Any]])
+        XCTAssertTrue(endings.contains { $0["value"] as? String == "rebooted" })
+        XCTAssertTrue(endings.contains { $0["value"] as? String == "cut_off" })
+    }
+
     // MARK: - The live tail
 
     func testTheLiveStreamDeliversOnlyWhatTheFilterMatches() throws {

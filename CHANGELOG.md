@@ -6,6 +6,77 @@ All notable changes to mcastsyslog are recorded here. The format follows
 
 ## [Unreleased]
 
+## [v0.2.0] — 2026-08-25
+
+Everything in this release was shaped by running against a real fleet for the
+first time. Several entries below are the analysis being wrong about something
+the real traffic showed.
+
+### Added
+
+- **A sequence analysis** (`/api/v1/analysis`). Reads a whole sequence — a
+  boot, a run, a window of the fleet's life — rather than listing the lines in
+  it: a narrative, the phases it passed through, the order workloads came up,
+  where the time went, the first appearance of each severity, findings with a
+  confidence level, and what every other node was saying at each fault. When
+  one host is named the window snaps to that node's most recent boot, so the
+  sequence is the run rather than the span that happened to be asked for.
+- **Lifecycle markers** (`/api/v1/lifecycle`). Boots, clock syncs, clock
+  resets, faults and silences, derived from the stream and never asked of a
+  node. The kernel prints `Linux version …` exactly once per boot, so that is a
+  *stated* marker and outranks anything inferred from silence. Runs are
+  classified by how they ended — `rebooted`, `faulted`, `cut_off`, `quiet` —
+  and `cut_off` deliberately does not claim to be a crash.
+- **Cursor tailing** — `since_id` on `/events`, returning `next_since_id`. How
+  something without a screen follows the log: no held-open connection to time
+  out, and asking twice gives the same answer, which a stream cannot promise.
+- **A Claude plugin** (`plugin/mcastsyslog`) — an MCP server over the local API
+  plus four commands. Standard-library Python; a plugin that needs
+  `pip install` before it works is a plugin that does not work.
+- **JSON document export**, alongside JSONL and plain text. Streamed rather
+  than assembled. Import accepts either shape without being told which.
+- **Clearing the log** — Stream → Clear Stored Events (⇧⌘⌫), and a
+  `/api/v1/clear` endpoint guarded three ways: switched on deliberately,
+  refused when the API serves remotely, and `confirm=yes` on the request.
+- `message_plain` on events, and stripped rendering in the app: real nodes emit
+  ANSI colour because `stormpump` forwards a workload's stdout as it was
+  written. `message` keeps the escapes — that is what the node sent — but a log
+  viewer that renders them is unreadable.
+- The REST API is now on by default, still bound to `127.0.0.1`. A local API
+  that has to be switched on before it answers is one nobody uses.
+
+### Fixed
+
+- `Severity` conformed to `Comparable` with the order inverted, which made
+  `min()` return the *least* severe at three call sites that all wanted the
+  worst — the fleet sidebar's indicator, its sort order, and a run's worst
+  severity. A comparator that surprises its own author is the wrong comparator.
+- The startup phase used event count to decide which workload debuts counted as
+  the system coming up. A single line can be one percent of a small window
+  while a workload that matters can be a fraction of a percent of a large one;
+  the separating property is time, not size. Against the real fleet this read
+  the entire window and now reads 29.8 seconds.
+- Phases described a whole fleet as though it were one machine. They are
+  computed only when a single host is named.
+- Preferring stated boots initially *replaced* inferred ones, merging six
+  restarts of one node into a single run. Both are kept, and boundaries
+  milliseconds apart — the kernel banner and the first line of userspace —
+  collapse to one.
+- A run ended by another boot was reported as having stopped mid-stream. It is
+  `rebooted`, which is a different fact.
+- An ntpd clock step was being read as a reboot. A clock reset is still marked,
+  since the node's sense of time did change, but it no longer starts a run.
+
+### Testing
+
+- 140 tests, up from 60: plain-text stripping, lifecycle detection, the
+  analysis, cursor tailing, the clearing guards and the JSON document format.
+
+### Documentation
+
+- `docs/API.md` covers the lifecycle, the analysis, tailing and clearing.
+- `docs/EXPORT.md` covers the two shapes and `message_plain`.
+
 ## [v0.1.0] — 2026-08-24
 
 First working version. The viewer joins the group, keeps what it hears,
