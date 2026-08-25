@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Deliberately unsandboxed. The App Sandbox's network-client entitlement does
+	  not cover joining a multicast group on a chosen interface, and the managed
+	  com.apple.developer.networking.multicast entitlement needs a provisioning
+	  profile granted by Apple. A local build joins the group with plain BSD
+	  sockets instead, which needs no entitlement on macOS.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

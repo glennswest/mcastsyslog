@@ -1,3 +1,33 @@
 target/
 .DS_Store
 *.redb
+
+# Xcode / generated project
+*.xcodeproj/
+*.xcworkspace/
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+
+# Logs and temp
+*.log
+tmp/
+temp/

@@ -1,0 +1,88 @@
+name: MCastSyslog
+
+options:
+  bundleIdPrefix: lo.stormcos
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_HARDENED_RUNTIME: NO
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+    GCC_TREAT_WARNINGS_AS_ERRORS: NO
+  configs:
+    debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+    release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+  MCastSyslog:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/MCastSyslog
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: lo.stormcos.mcastsyslog
+        PRODUCT_NAME: MCastSyslog
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/MCastSyslog.entitlements
+        ENABLE_APP_SANDBOX: NO
+        COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+    dependencies:
+      - sdk: libsqlite3.tbd
+
+  stormsim:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/stormsim
+      - path: Sources/MCastSyslog/Wire
+    settings:
+      base:
+        PRODUCT_NAME: stormsim
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) STORMSIM"
+
+  MCastSyslogTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/MCastSyslogTests
+    dependencies:
+      - target: MCastSyslog
+    settings:
+      base:
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/MCastSyslog.app/Contents/MacOS/MCastSyslog"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  MCastSyslog:
+    build:
+      targets:
+        MCastSyslog: all
+        stormsim: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MCastSyslogTests
+  stormsim:
+    build:
+      targets:
+        stormsim: all
+    run:
+      config: Debug
